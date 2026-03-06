@@ -213,8 +213,8 @@ public class WorkflowOrchestrator {
     private byte[] loadPayload(String messageId) {
         // We use the messageRepository without opening a new transaction just for a read
         return messageRepository.findById(messageId)
-                .map(r -> r.getPayloadData())
-                .orElse(null);
+                .map(r -> r.getPayloadData() != null ? r.getPayloadData() : new byte[0])
+                .orElse(new byte[0]);
     }
 
     private void recalculateMessageState(String messageId) {

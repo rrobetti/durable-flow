@@ -138,8 +138,8 @@ public class StepExecutor {
                 : stepRepository.getStepOutputs(step.getMessageId(), depNames);
 
         byte[] payload = messageRepository.findById(step.getMessageId())
-                .map(r -> r.getPayloadData())
-                .orElse(null);
+                .map(r -> r.getPayloadData() != null ? r.getPayloadData() : new byte[0])
+                .orElse(new byte[0]);
 
         return new StepContext(
                 step.getMessageId(),

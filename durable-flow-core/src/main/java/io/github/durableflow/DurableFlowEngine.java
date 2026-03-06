@@ -233,7 +233,7 @@ public class DurableFlowEngine implements Closeable {
     private static String computeHash(byte[] bytes) {
         long hi = LongHashFunction.xx3().hashBytes(bytes);
         // Use seeded call for low 64 bits
-        long lo = LongHashFunction.xx3(0xDEAD_BEEF_CAFE_BABAL).hashBytes(bytes);
+        long lo = LongHashFunction.xx3(0xDEAD_BEEF_CAFE_BABEL).hashBytes(bytes);
         return String.format("%016x%016x", hi, lo);
     }
 
