@@ -1,6 +1,6 @@
 # durable-flow-spring-sample
 
-A runnable Spring Boot 3.3 application that shows how to wire **durable-flow** into a real service:
+A runnable Spring Boot 4.x application that shows how to wire **durable-flow** into a real service:
 consume a JSON order message from an **ActiveMQ Artemis** topic, then process it with a two-step
 durable workflow — persisting the order to a database **and** publishing a notification event.
 

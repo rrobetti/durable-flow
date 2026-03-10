@@ -1,6 +1,6 @@
 package io.github.durableflow.sample;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import io.github.durableflow.sample.entity.OrderRecord;
 import io.github.durableflow.sample.model.OrderMessage;
 import io.github.durableflow.sample.repository.OrderRepository;

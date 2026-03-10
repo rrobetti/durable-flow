@@ -11,7 +11,7 @@
     </parent>
 
     <artifactId>durable-flow-spring-sample</artifactId>
-    <name>Durable Flow Spring Boot Sample</name>
+    <name>Durable Flow Spring Boot 4 Sample</name>
     <description>
         Sample Spring Boot application demonstrating durable-flow integration:
         reads JSON order messages from an ActiveMQ Artemis topic, and processes them
@@ -19,7 +19,7 @@
     </description>
 
     <properties>
-        <spring-boot.version>3.3.5</spring-boot.version>
+        <spring-boot.version>4.0.3</spring-boot.version>
     </properties>
 
     <dependencyManagement>
