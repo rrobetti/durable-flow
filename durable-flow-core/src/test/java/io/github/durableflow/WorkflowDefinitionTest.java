@@ -56,6 +56,38 @@ class WorkflowDefinitionTest {
     }
 
     @Test
+    void builder_defaultRetryPolicy_appliedToAllStepsWithNoExplicitPolicy() {
+        RetryPolicy noRetry = RetryPolicy.noRetry();
+        WorkflowDefinition wf = WorkflowDefinition.builder("no-retries")
+                .defaultRetryPolicy(noRetry)
+                .step("step1", ctx -> StepResult.empty())
+                .step("step2", ctx -> StepResult.empty())
+                .build();
+        assertFalse(wf.getSteps().get(0).getRetryPolicy().shouldRetry(0, new RuntimeException()));
+        assertFalse(wf.getSteps().get(1).getRetryPolicy().shouldRetry(0, new RuntimeException()));
+    }
+
+    @Test
+    void builder_perStepRetryPolicy_overridesWorkflowDefault() {
+        RetryPolicy perStep = RetryPolicy.fixedDelay(5, java.time.Duration.ofSeconds(1));
+        WorkflowDefinition wf = WorkflowDefinition.builder("mixed-policy")
+                .defaultRetryPolicy(RetryPolicy.noRetry())
+                .step("step1", ctx -> StepResult.empty()).retryPolicy(perStep)
+                .step("step2", ctx -> StepResult.empty())
+                .build();
+        // step1 has explicit per-step policy
+        assertEquals(5, wf.getSteps().get(0).getRetryPolicy().getMaxAttempts());
+        // step2 inherits the workflow-level default (noRetry)
+        assertFalse(wf.getSteps().get(1).getRetryPolicy().shouldRetry(0, new RuntimeException()));
+    }
+
+    @Test
+    void builder_nullDefaultRetryPolicy_throws() {
+        assertThrows(NullPointerException.class,
+                () -> WorkflowDefinition.builder("test").defaultRetryPolicy(null));
+    }
+
+    @Test
     void builder_emptyWorkflow_throws() {
         var builder = WorkflowDefinition.builder("empty");
         assertThrows(IllegalStateException.class, builder::build);
