@@ -67,6 +67,42 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
+    void asynchronousMode_messageIsPersistedSynchronously() throws Exception {
+        // Use a latch to freeze the background step execution so it cannot complete
+        // before we inspect the database. This proves that receive() persisted the
+        // message synchronously — before any background work began.
+        CountDownLatch stepStartLatch = new CountDownLatch(1);
+        CountDownLatch stepReleaseLatch = new CountDownLatch(1);
+
+        WorkflowDefinition wf = singleStepWorkflow("async-persist-wf", ctx -> {
+            stepStartLatch.countDown();   // signal: background thread has started
+            try {
+                stepReleaseLatch.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return StepResult.empty();
+        });
+
+        ReceiveResult result = engine.receive(message("async-persist-src", "payload"), ReceiveOptions.of(wf));
+
+        // receive() must have returned with RECEIVED, meaning the message was persisted
+        assertEquals(MessageState.RECEIVED, result.messageState());
+        assertFalse(result.duplicate());
+
+        // The message must already be in the database with state RECEIVED,
+        // even though the background step has not yet completed.
+        Optional<MessageStatus> status = engine.getMessageStatus(result.messageId());
+        assertTrue(status.isPresent(), "Message must be persisted in the DB before receive() returns");
+        assertEquals(MessageState.RECEIVED, status.get().getMessageState(),
+                "Message state must be RECEIVED immediately after receive() returns in ASYNC mode");
+
+        // Allow the background step to complete
+        stepReleaseLatch.countDown();
+        assertTrue(stepStartLatch.await(10, TimeUnit.SECONDS), "Background step should have started");
+    }
+
+    @Test
     void synchronousMode_multiStepWorkflow_returnsProcessed() throws Exception {
         DurableFlowEngine syncEngine = new DurableFlowEngine(dataSource, DurableFlowConfig.builder()
                 .leaseTimeoutSeconds(30)

@@ -106,6 +106,13 @@ public class DurableFlowEngine implements Closeable {
      * reflects the actual final {@link MessageState} after all currently executable steps
      * have run. In {@link ExecutionMode#ASYNCHRONOUS} mode (the default) the result always
      * carries {@link MessageState#RECEIVED} and step execution happens in the background.
+     *
+     * <p>Regardless of the execution mode, <strong>Phase 1 (persistence) always runs
+     * synchronously on the calling thread</strong>: the message is written to the database and
+     * the connection is fully committed and closed before this method either dispatches
+     * background work or returns to the caller. This guarantees that the caller can safely
+     * acknowledge the message to its queue or topic only after {@code receive()} returns,
+     * knowing the message is already durable.
      */
     public ReceiveResult receive(InboundMessage message, ReceiveOptions options) {
         Objects.requireNonNull(message, "message must not be null");
@@ -124,6 +131,10 @@ public class DurableFlowEngine implements Closeable {
         WorkflowDefinition workflow = options.workflow();
         workflowRegistry.register(workflow);
 
+        // Phase 1 (always synchronous): persist the message and its steps to the database.
+        // The connection is committed and fully closed before any step execution is dispatched,
+        // ensuring the message is durable before the caller can acknowledge it to a queue/topic.
+        final String messageId;
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
             try {
@@ -137,21 +148,11 @@ public class DurableFlowEngine implements Closeable {
                     return new ReceiveResult(insertResult.getMessageId(), true, insertResult.getExistingState());
                 }
 
-                String messageId = insertResult.getMessageId();
+                messageId = insertResult.getMessageId();
                 stepRepository.insertSteps(conn, messageId, workflow.getSteps());
                 conn.commit();
 
                 log.debug("Message persisted: id={} workflow={}", messageId, workflow.getName());
-
-                if (config.getExecutionMode() == ExecutionMode.SYNCHRONOUS) {
-                    // Execute steps on the calling thread and return the actual final state
-                    MessageState finalState = orchestrator.executeEligibleSteps(messageId, workflow);
-                    return new ReceiveResult(messageId, false, finalState);
-                } else {
-                    // Best-effort immediate step execution in the background (default)
-                    executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
-                    return new ReceiveResult(messageId, false, MessageState.RECEIVED);
-                }
 
             } catch (Exception e) {
                 conn.rollback();
@@ -159,6 +160,19 @@ public class DurableFlowEngine implements Closeable {
             }
         } catch (SQLException e) {
             throw new RuntimeException("Database connection error", e);
+        }
+
+        // Phase 2: execute eligible steps — on the calling thread (SYNCHRONOUS mode) or in
+        // the background (ASYNCHRONOUS mode). The persistence connection has already been
+        // closed at this point so it does not compete with execution-time connections.
+        if (config.getExecutionMode() == ExecutionMode.SYNCHRONOUS) {
+            // Execute steps on the calling thread and return the actual final state
+            MessageState finalState = orchestrator.executeEligibleSteps(messageId, workflow);
+            return new ReceiveResult(messageId, false, finalState);
+        } else {
+            // Best-effort immediate step execution in the background (default)
+            executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
+            return new ReceiveResult(messageId, false, MessageState.RECEIVED);
         }
     }
 
