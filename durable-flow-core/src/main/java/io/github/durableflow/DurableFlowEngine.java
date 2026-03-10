@@ -5,6 +5,8 @@ import io.github.durableflow.engine.MessageStateCalculator;
 import io.github.durableflow.engine.WorkflowOrchestrator;
 import io.github.durableflow.engine.WorkflowRegistry;
 import io.github.durableflow.persistence.*;
+import io.github.durableflow.persistence.dialect.DatabaseDialect;
+import io.github.durableflow.persistence.dialect.DatabaseDialectFactory;
 import io.github.durableflow.scheduler.RecoveryScheduler;
 import io.github.durableflow.spi.*;
 import net.openhft.hashing.LongHashFunction;
@@ -65,12 +67,17 @@ public class DurableFlowEngine implements Closeable {
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.metricsListener = metricsListener != null ? metricsListener : NoOpMetricsListener.INSTANCE;
 
+        // Resolve dialect: use explicit config override, or auto-detect from JDBC metadata
+        DatabaseDialect dialect = config.getDialect() != null
+                ? config.getDialect()
+                : DatabaseDialectFactory.detect(dataSource);
+
         if (config.isSchemaAutoMigrate()) {
-            runMigrations(dataSource);
+            runMigrations(dataSource, dialect);
         }
 
-        this.messageRepository = new JdbcMessageRepository(dataSource);
-        this.stepRepository = new JdbcStepRepository(dataSource);
+        this.messageRepository = new JdbcMessageRepository(dataSource, dialect);
+        this.stepRepository = new JdbcStepRepository(dataSource, dialect);
         this.workflowRegistry = new WorkflowRegistry();
         this.executorService = Executors.newFixedThreadPool(config.getImmediateExecutionThreads(),
                 r -> {
@@ -222,10 +229,10 @@ public class DurableFlowEngine implements Closeable {
     // Internal helpers
     // -------------------------------------------------------------------------
 
-    private static void runMigrations(DataSource dataSource) {
+    private static void runMigrations(DataSource dataSource, DatabaseDialect dialect) {
         Flyway flyway = Flyway.configure()
                 .dataSource(dataSource)
-                .locations("classpath:db/migration")
+                .locations(dialect.flywayLocation())
                 .load();
         flyway.migrate();
     }

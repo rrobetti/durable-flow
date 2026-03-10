@@ -3,6 +3,7 @@ package io.github.durableflow.integration;
 import io.github.durableflow.api.*;
 import io.github.durableflow.persistence.JdbcStepRepository;
 import io.github.durableflow.persistence.StepRecord;
+import io.github.durableflow.persistence.dialect.PostgreSqlDialect;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
@@ -37,7 +38,7 @@ class RecoveryIntegrationTest extends BaseIntegrationTest {
         // Simulate expired lease by manually setting a step to RUNNING with expired locked_until
         forceExpiredLease(result.messageId());
 
-        JdbcStepRepository repo = new JdbcStepRepository(dataSource);
+        JdbcStepRepository repo = new JdbcStepRepository(dataSource, PostgreSqlDialect.INSTANCE);
         int recovered = repo.recoverExpiredLeases();
         assertTrue(recovered >= 0, "Recovery should not error");
 
@@ -64,7 +65,7 @@ class RecoveryIntegrationTest extends BaseIntegrationTest {
         // The engine has leaseTimeout=5s and recoveryInterval=2s (set in BaseIntegrationTest)
         // so recovery should pick up any dangling steps within a few seconds
         String msgId2 = engine.receive(message("sched-src2", "data2"), ReceiveOptions.of(wf)).messageId();
-        List<StepRecord> steps = new JdbcStepRepository(dataSource)
+        List<StepRecord> steps = new JdbcStepRepository(dataSource, PostgreSqlDialect.INSTANCE)
                 .findStepsForMessage(engine.getMessageStatus(msgId2).get().getMessageId());
         assertFalse(steps.isEmpty());
     }

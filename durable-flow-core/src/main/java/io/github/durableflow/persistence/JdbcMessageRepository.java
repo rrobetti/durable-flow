@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.durableflow.api.MessageState;
 import io.github.durableflow.api.PayloadStorageMode;
+import io.github.durableflow.persistence.dialect.DatabaseDialect;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,7 +17,8 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * JDBC implementation of {@link MessageRepository} targeting PostgreSQL.
+ * JDBC implementation of {@link MessageRepository}.
+ * Database-specific SQL is provided by the injected {@link DatabaseDialect}.
  */
 public class JdbcMessageRepository implements MessageRepository {
 
@@ -25,22 +27,16 @@ public class JdbcMessageRepository implements MessageRepository {
     private static final TypeReference<Map<String, String>> MAP_TYPE = new TypeReference<>() {};
 
     private final DataSource dataSource;
+    private final DatabaseDialect dialect;
 
-    public JdbcMessageRepository(DataSource dataSource) {
+    public JdbcMessageRepository(DataSource dataSource, DatabaseDialect dialect) {
         this.dataSource = dataSource;
+        this.dialect = dialect;
     }
 
     @Override
     public InsertResult insertMessage(Connection conn, MessageRecord message) {
-        String sql = """
-                INSERT INTO messages (
-                    id, source, dedupe_hash, payload_length, payload_storage_mode,
-                    payload_data, payload_ref, message_state, created_at, updated_at,
-                    metadata_json, workflow_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (source, dedupe_hash, payload_length) DO NOTHING
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (PreparedStatement ps = conn.prepareStatement(dialect.insertMessageSql())) {
             ps.setString(1, message.getId());
             ps.setString(2, message.getSource());
             ps.setString(3, message.getDedupeHash());
@@ -55,12 +51,16 @@ public class JdbcMessageRepository implements MessageRepository {
             ps.setString(12, message.getWorkflowName());
 
             int rows = ps.executeUpdate();
-            if (rows == 1) {
+            if (rows > 0) {
                 return InsertResult.newlyInserted(message.getId());
             }
-            // Conflict occurred – retrieve the existing record
+            // rows == 0: dialect silently swallowed the duplicate (e.g. ON CONFLICT DO NOTHING / INSERT IGNORE)
             return findExisting(conn, message.getSource(), message.getDedupeHash(), message.getPayloadLength());
         } catch (SQLException e) {
+            if (dialect.isUniqueConstraintViolation(e)) {
+                // Other dialects raise an exception on duplicate rather than returning 0 rows
+                return findExisting(conn, message.getSource(), message.getDedupeHash(), message.getPayloadLength());
+            }
             throw new RuntimeException("Failed to insert message", e);
         }
     }
@@ -84,7 +84,7 @@ public class JdbcMessageRepository implements MessageRepository {
 
     @Override
     public void updateMessageState(Connection conn, String id, MessageState state) {
-        String sql = "UPDATE messages SET message_state = ?, updated_at = NOW() WHERE id = ?";
+        String sql = "UPDATE messages SET message_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, state.name());
             ps.setString(2, id);
@@ -96,7 +96,7 @@ public class JdbcMessageRepository implements MessageRepository {
 
     @Override
     public void updateMessageStateWithError(Connection conn, String id, MessageState state, String error) {
-        String sql = "UPDATE messages SET message_state = ?, last_error = ?, updated_at = NOW() WHERE id = ?";
+        String sql = "UPDATE messages SET message_state = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, state.name());
             ps.setString(2, error);

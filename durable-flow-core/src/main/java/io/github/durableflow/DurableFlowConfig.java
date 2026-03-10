@@ -1,5 +1,7 @@
 package io.github.durableflow;
 
+import io.github.durableflow.persistence.dialect.DatabaseDialect;
+
 import java.util.Objects;
 import java.util.UUID;
 
@@ -18,6 +20,8 @@ public final class DurableFlowConfig {
     private final int recoveryIntervalSeconds;
     private final int immediateExecutionThreads;
     private final boolean schemaAutoMigrate;
+    /** Optional override; {@code null} means auto-detect from JDBC metadata. */
+    private final DatabaseDialect dialect;
 
     private DurableFlowConfig(Builder builder) {
         this.nodeId = builder.nodeId;
@@ -25,6 +29,7 @@ public final class DurableFlowConfig {
         this.recoveryIntervalSeconds = builder.recoveryIntervalSeconds;
         this.immediateExecutionThreads = builder.immediateExecutionThreads;
         this.schemaAutoMigrate = builder.schemaAutoMigrate;
+        this.dialect = builder.dialect;
     }
 
     public static Builder builder() {
@@ -55,6 +60,14 @@ public final class DurableFlowConfig {
         return schemaAutoMigrate;
     }
 
+    /**
+     * Returns the explicitly configured {@link DatabaseDialect}, or {@code null} if the engine
+     * should auto-detect the dialect from JDBC metadata.
+     */
+    public DatabaseDialect getDialect() {
+        return dialect;
+    }
+
     // -------------------------------------------------------------------------
     // Builder
     // -------------------------------------------------------------------------
@@ -65,6 +78,7 @@ public final class DurableFlowConfig {
         private int recoveryIntervalSeconds = DEFAULT_RECOVERY_INTERVAL_SECONDS;
         private int immediateExecutionThreads = DEFAULT_IMMEDIATE_EXECUTION_THREADS;
         private boolean schemaAutoMigrate = DEFAULT_SCHEMA_AUTO_MIGRATE;
+        private DatabaseDialect dialect = null;
 
         private Builder() {}
 
@@ -93,6 +107,16 @@ public final class DurableFlowConfig {
 
         public Builder schemaAutoMigrate(boolean migrate) {
             this.schemaAutoMigrate = migrate;
+            return this;
+        }
+
+        /**
+         * Explicitly sets the database dialect, bypassing auto-detection.
+         * Useful when the JDBC URL does not unambiguously identify the database,
+         * or when using a custom dialect implementation.
+         */
+        public Builder dialect(DatabaseDialect dialect) {
+            this.dialect = dialect;
             return this;
         }
 

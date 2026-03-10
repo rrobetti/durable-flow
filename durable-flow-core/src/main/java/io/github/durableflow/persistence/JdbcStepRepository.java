@@ -3,6 +3,7 @@ package io.github.durableflow.persistence;
 import io.github.durableflow.api.RetryPolicy;
 import io.github.durableflow.api.StepDefinition;
 import io.github.durableflow.api.StepState;
+import io.github.durableflow.persistence.dialect.DatabaseDialect;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -12,40 +13,28 @@ import java.time.Instant;
 import java.util.*;
 
 /**
- * JDBC implementation of {@link StepRepository} targeting PostgreSQL.
+ * JDBC implementation of {@link StepRepository}.
+ * Database-specific SQL is provided by the injected {@link DatabaseDialect}.
  */
 public class JdbcStepRepository implements StepRepository {
 
     private static final Logger log = LoggerFactory.getLogger(JdbcStepRepository.class);
 
     private final DataSource dataSource;
+    private final DatabaseDialect dialect;
 
-    public JdbcStepRepository(DataSource dataSource) {
+    public JdbcStepRepository(DataSource dataSource, DatabaseDialect dialect) {
         this.dataSource = dataSource;
+        this.dialect = dialect;
     }
 
     @Override
     public void insertSteps(Connection conn, String messageId, List<StepDefinition> steps) {
-        String stepSql = """
-                INSERT INTO message_steps (
-                    id, message_id, step_name, step_state, attempt_count,
-                    max_attempts, retry_delay_ms, retry_multiplier, retry_max_delay_ms, retry_jitter,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, 'PENDING', 0, ?, ?, ?, ?, ?, NOW(), NOW())
-                ON CONFLICT (message_id, step_name) DO NOTHING
-                """;
-        String depSql = """
-                INSERT INTO message_step_dependencies (message_id, step_name, depends_on_step_name)
-                VALUES (?, ?, ?)
-                ON CONFLICT DO NOTHING
-                """;
-
-        try (PreparedStatement stepPs = conn.prepareStatement(stepSql);
-             PreparedStatement depPs = conn.prepareStatement(depSql)) {
+        try (PreparedStatement stepPs = conn.prepareStatement(dialect.insertStepSql());
+             PreparedStatement depPs = conn.prepareStatement(dialect.insertDependencySql())) {
 
             for (StepDefinition step : steps) {
                 RetryPolicy policy = step.getRetryPolicy();
-                // Compute representative delay params from policy
                 long delayMs = policy.nextDelay(1).toMillis();
 
                 stepPs.setString(1, UUID.randomUUID().toString());
@@ -53,7 +42,7 @@ public class JdbcStepRepository implements StepRepository {
                 stepPs.setString(3, step.getName());
                 stepPs.setInt(4, policy.getMaxAttempts());
                 stepPs.setLong(5, delayMs);
-                stepPs.setDouble(6, 2.0); // default multiplier; stored for recovery
+                stepPs.setDouble(6, 2.0);
                 stepPs.setLong(7, 60_000L);
                 stepPs.setBoolean(8, false);
                 stepPs.addBatch();
@@ -69,36 +58,24 @@ public class JdbcStepRepository implements StepRepository {
             depPs.executeBatch();
 
         } catch (SQLException e) {
+            if (dialect.isUniqueConstraintViolation(e)) {
+                log.debug("Step insert skipped due to duplicate key for message: {}", messageId);
+                return;
+            }
             throw new RuntimeException("Failed to insert steps for message: " + messageId, e);
         }
     }
 
     @Override
     public List<StepRecord> findEligibleSteps(int limit) {
-        String sql = """
-                SELECT ms.* FROM message_steps ms
-                WHERE ms.step_state IN ('PENDING', 'FAILED_RETRYABLE')
-                  AND (ms.next_retry_at IS NULL OR ms.next_retry_at <= NOW())
-                  AND (ms.locked_until IS NULL OR ms.locked_until < NOW())
-                  AND NOT EXISTS (
-                    SELECT 1 FROM message_step_dependencies d
-                    JOIN message_steps dep ON dep.message_id = d.message_id
-                        AND dep.step_name = d.depends_on_step_name
-                    WHERE d.message_id = ms.message_id AND d.step_name = ms.step_name
-                      AND dep.step_state != 'SUCCEEDED'
-                  )
-                LIMIT ?
-                FOR UPDATE SKIP LOCKED
-                """;
+        String sql = dialect.findEligibleStepsSql(limit);
         List<StepRecord> results = new ArrayList<>();
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setInt(1, limit);
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        results.add(mapRow(rs));
-                    }
+            try (PreparedStatement ps = conn.prepareStatement(sql);
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    results.add(mapRow(rs));
                 }
                 conn.commit();
             } catch (SQLException e) {
@@ -113,26 +90,11 @@ public class JdbcStepRepository implements StepRepository {
 
     @Override
     public boolean claimStep(Connection conn, String stepId, String nodeId, Instant lockedUntil) {
-        String sql = """
-                UPDATE message_steps
-                SET step_state = 'RUNNING',
-                    owner = ?,
-                    locked_until = ?,
-                    attempt_count = attempt_count + 1,
-                    updated_at = NOW()
-                WHERE id = ?
-                  AND step_state IN ('PENDING', 'FAILED_RETRYABLE')
-                  AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-                  AND (locked_until IS NULL OR locked_until < NOW())
-                RETURNING id
-                """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (PreparedStatement ps = conn.prepareStatement(dialect.claimStepSql())) {
             ps.setString(1, nodeId);
             ps.setTimestamp(2, Timestamp.from(lockedUntil));
             ps.setString(3, stepId);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next();
-            }
+            return ps.executeUpdate() > 0;
         } catch (SQLException e) {
             throw new RuntimeException("Failed to claim step: " + stepId, e);
         }
@@ -142,11 +104,11 @@ public class JdbcStepRepository implements StepRepository {
     public void markSucceeded(Connection conn, String stepId, byte[] output) {
         String sql = """
                 UPDATE message_steps
-                SET step_state = 'SUCCEEDED',
-                    result_data = ?,
+                SET step_state   = 'SUCCEEDED',
+                    result_data  = ?,
                     locked_until = NULL,
-                    owner = NULL,
-                    updated_at = NOW()
+                    owner        = NULL,
+                    updated_at   = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -164,12 +126,12 @@ public class JdbcStepRepository implements StepRepository {
         String state = retryable ? "FAILED_RETRYABLE" : "FAILED_FINAL";
         String sql = """
                 UPDATE message_steps
-                SET step_state = ?,
+                SET step_state    = ?,
                     next_retry_at = ?,
-                    locked_until = NULL,
-                    owner = NULL,
-                    last_error = ?,
-                    updated_at = NOW()
+                    locked_until  = NULL,
+                    owner         = NULL,
+                    last_error    = ?,
+                    updated_at    = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -228,18 +190,8 @@ public class JdbcStepRepository implements StepRepository {
 
     @Override
     public int recoverExpiredLeases() {
-        String sql = """
-                UPDATE message_steps
-                SET step_state = 'FAILED_RETRYABLE',
-                    locked_until = NULL,
-                    owner = NULL,
-                    next_retry_at = NOW(),
-                    updated_at = NOW()
-                WHERE step_state = 'RUNNING'
-                  AND locked_until < NOW()
-                """;
         try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
+             PreparedStatement ps = conn.prepareStatement(dialect.recoverExpiredLeasesSql())) {
             int updated = ps.executeUpdate();
             conn.commit();
             return updated;
@@ -252,11 +204,11 @@ public class JdbcStepRepository implements StepRepository {
     public void resetFailedFinalSteps(String messageId) {
         String sql = """
                 UPDATE message_steps
-                SET step_state = 'PENDING',
+                SET step_state    = 'PENDING',
                     attempt_count = 0,
-                    last_error = NULL,
+                    last_error    = NULL,
                     next_retry_at = NULL,
-                    updated_at = NOW()
+                    updated_at    = CURRENT_TIMESTAMP
                 WHERE message_id = ? AND step_state = 'FAILED_FINAL'
                 """;
         try (Connection conn = dataSource.getConnection();
