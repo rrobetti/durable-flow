@@ -98,7 +98,14 @@ public class DurableFlowEngine implements Closeable {
     // -------------------------------------------------------------------------
 
     /**
-     * Receives an inbound message, persists it (deduplicated), and submits eligible steps.
+     * Receives an inbound message, persists it (deduplicated), and executes eligible steps
+     * either synchronously (blocking) or asynchronously depending on
+     * {@link DurableFlowConfig#getExecutionMode()}.
+     *
+     * <p>In {@link ExecutionMode#SYNCHRONOUS} mode the returned {@link ReceiveResult}
+     * reflects the actual final {@link MessageState} after all currently executable steps
+     * have run. In {@link ExecutionMode#ASYNCHRONOUS} mode (the default) the result always
+     * carries {@link MessageState#RECEIVED} and step execution happens in the background.
      */
     public ReceiveResult receive(InboundMessage message, ReceiveOptions options) {
         Objects.requireNonNull(message, "message must not be null");
@@ -136,10 +143,15 @@ public class DurableFlowEngine implements Closeable {
 
                 log.debug("Message persisted: id={} workflow={}", messageId, workflow.getName());
 
-                // Best-effort immediate step execution after commit
-                executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
-
-                return new ReceiveResult(messageId, false, MessageState.RECEIVED);
+                if (config.getExecutionMode() == ExecutionMode.SYNCHRONOUS) {
+                    // Execute steps on the calling thread and return the actual final state
+                    MessageState finalState = orchestrator.executeEligibleSteps(messageId, workflow);
+                    return new ReceiveResult(messageId, false, finalState);
+                } else {
+                    // Best-effort immediate step execution in the background (default)
+                    executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
+                    return new ReceiveResult(messageId, false, MessageState.RECEIVED);
+                }
 
             } catch (Exception e) {
                 conn.rollback();

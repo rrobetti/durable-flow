@@ -20,6 +20,8 @@ and background recovery — all backed by a relational database.
 4. [Core Concepts](#core-concepts)
    - [InboundMessage](#inboundmessage)
    - [WorkflowDefinition](#workflowdefinition)
+   - [Lifecycle Hooks](#lifecycle-hooks)
+   - [ExecutionMode](#executionmode)
    - [RetryPolicy](#retrypolicy)
    - [MessagePreprocessor SPI](#messagepreprocessor-spi)
    - [MetricsListener SPI](#metricslistener-spi)
@@ -43,6 +45,8 @@ and background recovery — all backed by a relational database.
 - **Lease-based concurrency** — atomic `UPDATE … WHERE step_state IN (…)` prevents double-execution across nodes
 - **Configurable retry policies** — fixed, exponential back-off, jitter; per-step exception classifiers
 - **Background recovery** — expired leases and retryable failures are picked up by a scheduler
+- **Execution modes** — `SYNCHRONOUS` (blocking, returns final state) or `ASYNCHRONOUS` (returns immediately, executes in background thread pool)
+- **Lifecycle hooks** — `beforeProcessing` / `afterProcessing` run at the very start and end of every workflow run, regardless of success or failure
 - **Observability** — SLF4J structured logging + `MetricsListener` SPI for your own metrics system
 - **Schema migrations** — Flyway manages the schema automatically on startup for all supported databases
 - **Extension points** — `MessagePreprocessor` for canonicalization / payload scrubbing

@@ -79,4 +79,60 @@ class WorkflowDefinitionTest {
     void nullWorkflowName_throws() {
         assertThrows(NullPointerException.class, () -> WorkflowDefinition.builder(null));
     }
+
+    @Test
+    void beforeProcessing_isStoredOnWorkflow() {
+        WorkflowLifecycleHandler hook = ctx -> {};
+        WorkflowDefinition wf = WorkflowDefinition.builder("hook-test")
+                .beforeProcessing(hook)
+                .step("s1", ctx -> StepResult.empty())
+                .build();
+        assertSame(hook, wf.getBeforeProcessing());
+        assertNull(wf.getAfterProcessing());
+    }
+
+    @Test
+    void afterProcessing_isStoredOnWorkflow() {
+        WorkflowLifecycleHandler hook = ctx -> {};
+        WorkflowDefinition wf = WorkflowDefinition.builder("hook-test2")
+                .step("s1", ctx -> StepResult.empty())
+                .afterProcessing(hook)
+                .build();
+        assertSame(hook, wf.getAfterProcessing());
+        assertNull(wf.getBeforeProcessing());
+    }
+
+    @Test
+    void bothLifecycleHooks_canBeSetIndependently() {
+        WorkflowLifecycleHandler before = ctx -> {};
+        WorkflowLifecycleHandler after = ctx -> {};
+        WorkflowDefinition wf = WorkflowDefinition.builder("hook-both")
+                .beforeProcessing(before)
+                .step("s1", ctx -> StepResult.empty())
+                .afterProcessing(after)
+                .build();
+        assertSame(before, wf.getBeforeProcessing());
+        assertSame(after, wf.getAfterProcessing());
+    }
+
+    @Test
+    void noLifecycleHooks_returnsNull() {
+        WorkflowDefinition wf = WorkflowDefinition.builder("no-hooks")
+                .step("s1", ctx -> StepResult.empty())
+                .build();
+        assertNull(wf.getBeforeProcessing());
+        assertNull(wf.getAfterProcessing());
+    }
+
+    @Test
+    void nullBeforeProcessingHook_throws() {
+        assertThrows(NullPointerException.class,
+                () -> WorkflowDefinition.builder("test").beforeProcessing(null));
+    }
+
+    @Test
+    void nullAfterProcessingHook_throws() {
+        assertThrows(NullPointerException.class,
+                () -> WorkflowDefinition.builder("test").afterProcessing(null));
+    }
 }

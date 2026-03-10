@@ -1,5 +1,6 @@
 package io.github.durableflow;
 
+import io.github.durableflow.api.ExecutionMode;
 import io.github.durableflow.persistence.dialect.DatabaseDialect;
 
 import java.util.Objects;
@@ -14,6 +15,7 @@ public final class DurableFlowConfig {
     public static final int DEFAULT_RECOVERY_INTERVAL_SECONDS = 30;
     public static final int DEFAULT_IMMEDIATE_EXECUTION_THREADS = 4;
     public static final boolean DEFAULT_SCHEMA_AUTO_MIGRATE = true;
+    public static final ExecutionMode DEFAULT_EXECUTION_MODE = ExecutionMode.ASYNCHRONOUS;
 
     private final String nodeId;
     private final int leaseTimeoutSeconds;
@@ -22,6 +24,7 @@ public final class DurableFlowConfig {
     private final boolean schemaAutoMigrate;
     /** Optional override; {@code null} means auto-detect from JDBC metadata. */
     private final DatabaseDialect dialect;
+    private final ExecutionMode executionMode;
 
     private DurableFlowConfig(Builder builder) {
         this.nodeId = builder.nodeId;
@@ -30,6 +33,7 @@ public final class DurableFlowConfig {
         this.immediateExecutionThreads = builder.immediateExecutionThreads;
         this.schemaAutoMigrate = builder.schemaAutoMigrate;
         this.dialect = builder.dialect;
+        this.executionMode = builder.executionMode;
     }
 
     public static Builder builder() {
@@ -68,6 +72,15 @@ public final class DurableFlowConfig {
         return dialect;
     }
 
+    /**
+     * Returns the execution mode controlling whether {@code receive()} blocks until the workflow
+     * completes ({@link ExecutionMode#SYNCHRONOUS}) or returns immediately
+     * ({@link ExecutionMode#ASYNCHRONOUS}).
+     */
+    public ExecutionMode getExecutionMode() {
+        return executionMode;
+    }
+
     // -------------------------------------------------------------------------
     // Builder
     // -------------------------------------------------------------------------
@@ -79,6 +92,7 @@ public final class DurableFlowConfig {
         private int immediateExecutionThreads = DEFAULT_IMMEDIATE_EXECUTION_THREADS;
         private boolean schemaAutoMigrate = DEFAULT_SCHEMA_AUTO_MIGRATE;
         private DatabaseDialect dialect = null;
+        private ExecutionMode executionMode = DEFAULT_EXECUTION_MODE;
 
         private Builder() {}
 
@@ -117,6 +131,15 @@ public final class DurableFlowConfig {
          */
         public Builder dialect(DatabaseDialect dialect) {
             this.dialect = dialect;
+            return this;
+        }
+
+        /**
+         * Sets the execution mode for post-receive step dispatch.
+         * Defaults to {@link ExecutionMode#ASYNCHRONOUS}.
+         */
+        public Builder executionMode(ExecutionMode executionMode) {
+            this.executionMode = Objects.requireNonNull(executionMode, "executionMode must not be null");
             return this;
         }
 

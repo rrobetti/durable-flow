@@ -6,14 +6,17 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Immutable description of a workflow – a named, ordered set of steps.
+ * Immutable description of a workflow – a named, ordered set of steps with optional
+ * lifecycle hooks.
  *
  * <p>Use {@link #builder(String)} to construct instances:
  * <pre>{@code
  * WorkflowDefinition wf = WorkflowDefinition.builder("order-processing")
+ *     .beforeProcessing(ctx -> log.info("Starting {}", ctx.getMessageId()))
  *     .step("validate",  ctx -> StepResult.empty())
  *     .step("enrich",    ctx -> StepResult.empty()).dependsOn("validate").retryPolicy(policy)
  *     .step("notify",    ctx -> StepResult.empty()).dependsOn("enrich")
+ *     .afterProcessing(ctx -> log.info("Done: {}", ctx.getFinalState()))
  *     .build();
  * }</pre>
  */
@@ -21,10 +24,16 @@ public final class WorkflowDefinition {
 
     private final String name;
     private final List<StepDefinition> steps;
+    private final WorkflowLifecycleHandler beforeProcessing;
+    private final WorkflowLifecycleHandler afterProcessing;
 
-    private WorkflowDefinition(String name, List<StepDefinition> steps) {
+    private WorkflowDefinition(String name, List<StepDefinition> steps,
+                                WorkflowLifecycleHandler beforeProcessing,
+                                WorkflowLifecycleHandler afterProcessing) {
         this.name = name;
         this.steps = Collections.unmodifiableList(new ArrayList<>(steps));
+        this.beforeProcessing = beforeProcessing;
+        this.afterProcessing = afterProcessing;
     }
 
     public String getName() {
@@ -33,6 +42,22 @@ public final class WorkflowDefinition {
 
     public List<StepDefinition> getSteps() {
         return steps;
+    }
+
+    /**
+     * Returns the lifecycle hook invoked before any steps execute, or {@code null} if none
+     * was registered.
+     */
+    public WorkflowLifecycleHandler getBeforeProcessing() {
+        return beforeProcessing;
+    }
+
+    /**
+     * Returns the lifecycle hook invoked after all steps finish (regardless of outcome),
+     * or {@code null} if none was registered.
+     */
+    public WorkflowLifecycleHandler getAfterProcessing() {
+        return afterProcessing;
     }
 
     public static StepBuilder builder(String workflowName) {
@@ -48,9 +73,30 @@ public final class WorkflowDefinition {
         private final String workflowName;
         private final List<StepDefinition> steps = new ArrayList<>();
         private PendingStep pending;
+        private WorkflowLifecycleHandler beforeProcessing;
+        private WorkflowLifecycleHandler afterProcessing;
 
         private StepBuilder(String workflowName) {
             this.workflowName = Objects.requireNonNull(workflowName, "workflowName must not be null");
+        }
+
+        /**
+         * Registers a lifecycle hook invoked before any steps execute for a given message.
+         * May be called at any point during building; order relative to {@code step()} calls
+         * does not matter.
+         */
+        public StepBuilder beforeProcessing(WorkflowLifecycleHandler handler) {
+            this.beforeProcessing = Objects.requireNonNull(handler, "beforeProcessing handler must not be null");
+            return this;
+        }
+
+        /**
+         * Registers a lifecycle hook invoked after all steps finish (regardless of outcome).
+         * May be called at any point during building.
+         */
+        public StepBuilder afterProcessing(WorkflowLifecycleHandler handler) {
+            this.afterProcessing = Objects.requireNonNull(handler, "afterProcessing handler must not be null");
+            return this;
         }
 
         /** Add a step with an explicit name and handler. */
@@ -81,7 +127,7 @@ public final class WorkflowDefinition {
             if (steps.isEmpty()) {
                 throw new IllegalStateException("WorkflowDefinition must have at least one step");
             }
-            return new WorkflowDefinition(workflowName, steps);
+            return new WorkflowDefinition(workflowName, steps, beforeProcessing, afterProcessing);
         }
 
         private void commitPending() {
