@@ -1,0 +1,279 @@
+package io.github.durableflow;
+
+import io.github.durableflow.api.*;
+import io.github.durableflow.engine.MessageStateCalculator;
+import io.github.durableflow.engine.WorkflowOrchestrator;
+import io.github.durableflow.engine.WorkflowRegistry;
+import io.github.durableflow.persistence.*;
+import io.github.durableflow.persistence.dialect.DatabaseDialect;
+import io.github.durableflow.persistence.dialect.DatabaseDialectFactory;
+import io.github.durableflow.scheduler.RecoveryScheduler;
+import io.github.durableflow.spi.*;
+import net.openhft.hashing.LongHashFunction;
+import org.flywaydb.core.Flyway;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.sql.DataSource;
+import java.io.Closeable;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.time.Instant;
+import java.util.*;
+import java.util.concurrent.*;
+
+/**
+ * Main entry point for the durable-flow engine.
+ *
+ * <p>Typical usage:
+ * <pre>{@code
+ * DataSource ds = ...;
+ * DurableFlowEngine engine = new DurableFlowEngine(ds, DurableFlowConfig.defaults());
+ * engine.start();
+ *
+ * WorkflowDefinition wf = WorkflowDefinition.builder("my-workflow")
+ *     .step("step1", ctx -> StepResult.empty())
+ *     .build();
+ *
+ * ReceiveResult result = engine.receive(
+ *     new InboundMessage("my-source", payload, headers),
+ *     ReceiveOptions.of(wf));
+ *
+ * engine.close();
+ * }</pre>
+ */
+public class DurableFlowEngine implements Closeable {
+
+    private static final Logger log = LoggerFactory.getLogger(DurableFlowEngine.class);
+
+    private final DataSource dataSource;
+    private final DurableFlowConfig config;
+    private final MessageRepository messageRepository;
+    private final StepRepository stepRepository;
+    private final WorkflowOrchestrator orchestrator;
+    private final WorkflowRegistry workflowRegistry;
+    private final RecoveryScheduler recoveryScheduler;
+    private final MetricsListener metricsListener;
+    private final ExecutorService executorService;
+
+    private volatile boolean started = false;
+
+    public DurableFlowEngine(DataSource dataSource, DurableFlowConfig config) {
+        this(dataSource, config, NoOpMetricsListener.INSTANCE);
+    }
+
+    public DurableFlowEngine(DataSource dataSource, DurableFlowConfig config, MetricsListener metricsListener) {
+        this.dataSource = Objects.requireNonNull(dataSource, "dataSource must not be null");
+        this.config = Objects.requireNonNull(config, "config must not be null");
+        this.metricsListener = metricsListener != null ? metricsListener : NoOpMetricsListener.INSTANCE;
+
+        // Resolve dialect: use explicit config override, or auto-detect from JDBC metadata
+        DatabaseDialect dialect = config.getDialect() != null
+                ? config.getDialect()
+                : DatabaseDialectFactory.detect(dataSource);
+
+        if (config.isSchemaAutoMigrate()) {
+            runMigrations(dataSource, dialect);
+        }
+
+        this.messageRepository = new JdbcMessageRepository(dataSource, dialect);
+        this.stepRepository = new JdbcStepRepository(dataSource, dialect);
+        this.workflowRegistry = new WorkflowRegistry();
+        this.executorService = Executors.newFixedThreadPool(config.getImmediateExecutionThreads(),
+                r -> {
+                    Thread t = new Thread(r, "durable-flow-worker");
+                    t.setDaemon(true);
+                    return t;
+                });
+        this.orchestrator = new WorkflowOrchestrator(
+                dataSource, stepRepository, messageRepository,
+                config, this.metricsListener, executorService);
+        this.recoveryScheduler = new RecoveryScheduler(
+                dataSource, stepRepository, messageRepository,
+                workflowRegistry, orchestrator, config);
+    }
+
+    // -------------------------------------------------------------------------
+    // Public API
+    // -------------------------------------------------------------------------
+
+    /**
+     * Receives an inbound message, persists it (deduplicated), and executes eligible steps
+     * either synchronously (blocking) or asynchronously depending on
+     * {@link DurableFlowConfig#getExecutionMode()}.
+     *
+     * <p>In {@link ExecutionMode#SYNCHRONOUS} mode the returned {@link ReceiveResult}
+     * reflects the actual final {@link MessageState} after all currently executable steps
+     * have run. In {@link ExecutionMode#ASYNCHRONOUS} mode (the default) the result always
+     * carries {@link MessageState#RECEIVED} and step execution happens in the background.
+     */
+    public ReceiveResult receive(InboundMessage message, ReceiveOptions options) {
+        Objects.requireNonNull(message, "message must not be null");
+        Objects.requireNonNull(options, "options must not be null");
+
+        metricsListener.onMessageReceived();
+
+        MessagePreprocessor preprocessor = options.preprocessor() != null
+                ? options.preprocessor()
+                : DefaultMessagePreprocessor.INSTANCE;
+
+        PreprocessResult preprocessed = preprocessor.preprocess(message);
+        String dedupeHash = computeHash(preprocessed.getCanonicalBytes());
+        long payloadLength = preprocessed.getCanonicalBytes().length;
+
+        WorkflowDefinition workflow = options.workflow();
+        workflowRegistry.register(workflow);
+
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                MessageRecord record = buildMessageRecord(message, preprocessed, dedupeHash, payloadLength, workflow);
+                InsertResult insertResult = messageRepository.insertMessage(conn, record);
+
+                if (insertResult.isDuplicate()) {
+                    conn.rollback();
+                    metricsListener.onDuplicateMessage();
+                    log.debug("Duplicate message detected: source={} hash={}", message.source(), dedupeHash);
+                    return new ReceiveResult(insertResult.getMessageId(), true, insertResult.getExistingState());
+                }
+
+                String messageId = insertResult.getMessageId();
+                stepRepository.insertSteps(conn, messageId, workflow.getSteps());
+                conn.commit();
+
+                log.debug("Message persisted: id={} workflow={}", messageId, workflow.getName());
+
+                if (config.getExecutionMode() == ExecutionMode.SYNCHRONOUS) {
+                    // Execute steps on the calling thread and return the actual final state
+                    MessageState finalState = orchestrator.executeEligibleSteps(messageId, workflow);
+                    return new ReceiveResult(messageId, false, finalState);
+                } else {
+                    // Best-effort immediate step execution in the background (default)
+                    executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
+                    return new ReceiveResult(messageId, false, MessageState.RECEIVED);
+                }
+
+            } catch (Exception e) {
+                conn.rollback();
+                throw new RuntimeException("Failed to persist message: " + e.getMessage(), e);
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Database connection error", e);
+        }
+    }
+
+    /**
+     * Returns the current status of a message and its steps.
+     */
+    public Optional<MessageStatus> getMessageStatus(String messageId) {
+        Objects.requireNonNull(messageId, "messageId must not be null");
+        Optional<MessageRecord> record = messageRepository.findById(messageId);
+        if (record.isEmpty()) {
+            return Optional.empty();
+        }
+        MessageRecord msg = record.get();
+        List<StepRecord> steps = stepRepository.findStepsForMessage(messageId);
+        List<MessageStatus.StepStatus> stepStatuses = steps.stream()
+                .map(s -> new MessageStatus.StepStatus(s.getStepName(), s.getStepState(), s.getAttemptCount(), s.getLastError()))
+                .toList();
+        return Optional.of(new MessageStatus(
+                msg.getId(), msg.getMessageState(), msg.getWorkflowName(),
+                msg.getCreatedAt(), msg.getUpdatedAt(), stepStatuses));
+    }
+
+    /**
+     * Re-drives a PARKED message by resetting FAILED_FINAL steps to PENDING.
+     */
+    public void redrive(String messageId) {
+        Objects.requireNonNull(messageId, "messageId must not be null");
+        Optional<MessageRecord> record = messageRepository.findById(messageId);
+        if (record.isEmpty()) {
+            throw new IllegalArgumentException("Message not found: " + messageId);
+        }
+        if (record.get().getMessageState() != MessageState.PARKED) {
+            throw new IllegalStateException("Only PARKED messages can be redriven. Current state: "
+                    + record.get().getMessageState());
+        }
+        stepRepository.resetFailedFinalSteps(messageId);
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                messageRepository.updateMessageState(conn, messageId, MessageState.IN_PROGRESS);
+                conn.commit();
+            } catch (Exception e) {
+                conn.rollback();
+                throw new RuntimeException("Failed to redrive message", e);
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Database connection error", e);
+        }
+        String workflowName = record.get().getWorkflowName();
+        WorkflowDefinition workflow = workflowRegistry.find(workflowName)
+                .orElseThrow(() -> new IllegalStateException("Workflow not registered: " + workflowName));
+        executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
+    }
+
+    /** Starts the background recovery scheduler. */
+    public void start() {
+        if (!started) {
+            recoveryScheduler.start();
+            started = true;
+            log.info("DurableFlowEngine started. nodeId={}", config.getNodeId());
+        }
+    }
+
+    @Override
+    public void close() {
+        recoveryScheduler.stop();
+        executorService.shutdown();
+        try {
+            if (!executorService.awaitTermination(30, TimeUnit.SECONDS)) {
+                executorService.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executorService.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        log.info("DurableFlowEngine closed. nodeId={}", config.getNodeId());
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal helpers
+    // -------------------------------------------------------------------------
+
+    private static void runMigrations(DataSource dataSource, DatabaseDialect dialect) {
+        Flyway flyway = Flyway.configure()
+                .dataSource(dataSource)
+                .locations(dialect.flywayLocation())
+                .load();
+        flyway.migrate();
+    }
+
+    private static String computeHash(byte[] bytes) {
+        long hi = LongHashFunction.xx3().hashBytes(bytes);
+        // Use seeded call for low 64 bits
+        long lo = LongHashFunction.xx3(0xDEAD_BEEF_CAFE_BABEL).hashBytes(bytes);
+        return String.format("%016x%016x", hi, lo);
+    }
+
+    private static MessageRecord buildMessageRecord(
+            InboundMessage message,
+            PreprocessResult preprocessed,
+            String dedupeHash,
+            long payloadLength,
+            WorkflowDefinition workflow) {
+        MessageRecord r = new MessageRecord();
+        r.setId(UUID.randomUUID().toString());
+        r.setSource(message.source());
+        r.setDedupeHash(dedupeHash);
+        r.setPayloadLength(payloadLength);
+        r.setPayloadStorageMode(preprocessed.getPayloadStorageMode());
+        r.setPayloadData(preprocessed.getStoredPayload());
+        r.setMessageState(MessageState.RECEIVED);
+        r.setCreatedAt(Instant.now());
+        r.setUpdatedAt(Instant.now());
+        r.setMetadata(preprocessed.getMetadata());
+        r.setWorkflowName(workflow.getName());
+        return r;
+    }
+}

@@ -1,0 +1,33 @@
+# Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# IDE files
+.idea/
+*.iml
+*.ipr
+*.iws
+.eclipse/
+.classpath
+.project
+.settings/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test output
+surefire-reports/
+failsafe-reports/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
