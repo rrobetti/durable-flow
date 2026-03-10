@@ -31,9 +31,10 @@ and background recovery — all backed by a relational database.
 8. [Background Recovery](#background-recovery)
 9. [Multi-Database Support](#multi-database-support)
 10. [Configuration Reference](#configuration-reference)
-11. [Examples](#examples)
-12. [Running the Tests](#running-the-tests)
-13. [Module Structure](#module-structure)
+11. [Spring Boot Integration](#spring-boot-integration)
+12. [Examples](#examples)
+13. [Running the Tests](#running-the-tests)
+14. [Module Structure](#module-structure)
 
 ---
 
@@ -497,6 +498,28 @@ DurableFlowConfig config = DurableFlowConfig.builder()
 | `schemaAutoMigrate` | true | Whether to run Flyway migrations on startup |
 | `dialect` | auto-detected | Override the `DatabaseDialect`; `null` = auto-detect |
 | `executionMode` | `ASYNCHRONOUS` | `SYNCHRONOUS` blocks `receive()` until steps complete; `ASYNCHRONOUS` returns immediately |
+
+---
+
+## Spring Boot Integration
+
+durable-flow carries **no Spring Framework dependency** and integrates naturally with
+any Spring Boot application via a single `@Configuration` class. The guide covers:
+
+- Declaring `DurableFlowEngine` as a Spring-managed bean with automatic lifecycle management
+- **Transaction isolation** — how durable-flow's internal JDBC transactions interact
+  with Spring's `PlatformTransactionManager` and `@Transactional` methods
+- Available isolation strategies:
+  - **Shared DataSource** (default) — two independent connection-level transactions
+  - **Separate DataSource** — complete pool isolation
+  - **`TransactionSynchronizationManager.afterCommit()`** — call `receive()` only after
+    the business transaction commits, for atomic business + workflow trigger
+- Flyway co-existence options (let durable-flow manage its own schema, merge scripts,
+  or use a separate schema)
+- Execution mode selection (`SYNCHRONOUS` vs `ASYNCHRONOUS`) and its implications
+- Using Spring beans (`@Transactional` services, repositories) inside step handlers
+
+👉 **[Read the full Spring Boot Integration Guide](docs/spring-boot-integration.md)**
 
 ---
 
