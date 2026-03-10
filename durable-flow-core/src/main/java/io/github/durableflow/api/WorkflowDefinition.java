@@ -19,6 +19,17 @@ import java.util.Objects;
  *     .afterProcessing(ctx -> log.info("Done: {}", ctx.getFinalState()))
  *     .build();
  * }</pre>
+ *
+ * <p>To disable retries for every step in a workflow, set a workflow-level default:
+ * <pre>{@code
+ * WorkflowDefinition wf = WorkflowDefinition.builder("fire-and-forget")
+ *     .defaultRetryPolicy(RetryPolicy.noRetry())
+ *     .step("step-a", ctx -> StepResult.empty())
+ *     .step("step-b", ctx -> StepResult.empty())
+ *     .build();
+ * }</pre>
+ * A per-step {@link StepBuilder#retryPolicy(RetryPolicy)} call always takes precedence over the
+ * workflow-level default.
  */
 public final class WorkflowDefinition {
 
@@ -75,6 +86,7 @@ public final class WorkflowDefinition {
         private PendingStep pending;
         private WorkflowLifecycleHandler beforeProcessing;
         private WorkflowLifecycleHandler afterProcessing;
+        private RetryPolicy defaultRetryPolicy;
 
         private StepBuilder(String workflowName) {
             this.workflowName = Objects.requireNonNull(workflowName, "workflowName must not be null");
@@ -96,6 +108,26 @@ public final class WorkflowDefinition {
          */
         public StepBuilder afterProcessing(WorkflowLifecycleHandler handler) {
             this.afterProcessing = Objects.requireNonNull(handler, "afterProcessing handler must not be null");
+            return this;
+        }
+
+        /**
+         * Sets the default {@link RetryPolicy} applied to every step that does not declare its
+         * own policy.  When not set, steps fall back to {@link RetryPolicy#defaultPolicy()}.
+         *
+         * <p>Use {@link RetryPolicy#noRetry()} to disable retries for the entire workflow:
+         * <pre>{@code
+         * WorkflowDefinition.builder("fire-and-forget")
+         *     .defaultRetryPolicy(RetryPolicy.noRetry())
+         *     .step("step-a", ctx -> StepResult.empty())
+         *     .step("step-b", ctx -> StepResult.empty())
+         *     .build();
+         * }</pre>
+         *
+         * <p>A per-step {@link #retryPolicy(RetryPolicy)} call always overrides this default.
+         */
+        public StepBuilder defaultRetryPolicy(RetryPolicy policy) {
+            this.defaultRetryPolicy = Objects.requireNonNull(policy, "defaultRetryPolicy must not be null");
             return this;
         }
 
@@ -132,11 +164,14 @@ public final class WorkflowDefinition {
 
         private void commitPending() {
             if (pending != null) {
+                RetryPolicy effective = pending.retryPolicy != null
+                        ? pending.retryPolicy
+                        : (defaultRetryPolicy != null ? defaultRetryPolicy : RetryPolicy.defaultPolicy());
                 steps.add(new StepDefinition(
                         pending.name,
                         pending.handler,
                         Collections.unmodifiableList(new ArrayList<>(pending.dependsOn)),
-                        pending.retryPolicy != null ? pending.retryPolicy : RetryPolicy.defaultPolicy()));
+                        effective));
                 pending = null;
             }
         }

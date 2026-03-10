@@ -255,6 +255,10 @@ ReceiveResult result = syncEngine.receive(message, ReceiveOptions.of(workflow));
 
 ### RetryPolicy
 
+Retry policies can be applied **per step** or as a **workflow-level default**.
+
+#### Per-step policy
+
 ```java
 // Fixed delay
 RetryPolicy.fixedDelay(3, Duration.ofSeconds(2))
@@ -269,6 +273,31 @@ RetryPolicy.exponentialBackoff(5,
 // No retry
 RetryPolicy.noRetry()
 ```
+
+#### Disabling retries for an entire workflow
+
+Use `defaultRetryPolicy(RetryPolicy.noRetry())` on the builder to turn off retries for every step in the workflow in a single call:
+
+```java
+WorkflowDefinition wf = WorkflowDefinition.builder("fire-and-forget")
+    .defaultRetryPolicy(RetryPolicy.noRetry())
+    .step("step-a", ctx -> StepResult.empty())
+    .step("step-b", ctx -> StepResult.empty())
+    .build();
+```
+
+`defaultRetryPolicy` sets the fallback used when a step has no explicit `.retryPolicy(...)` call. A per-step policy always takes precedence:
+
+```java
+WorkflowDefinition wf = WorkflowDefinition.builder("mixed-policy")
+    .defaultRetryPolicy(RetryPolicy.noRetry())          // workflow default: no retries
+    .step("critical", ctx -> StepResult.empty())
+        .retryPolicy(RetryPolicy.fixedDelay(5, Duration.ofSeconds(2))) // overrides default
+    .step("best-effort", ctx -> StepResult.empty())     // inherits noRetry
+    .build();
+```
+
+When `defaultRetryPolicy` is not called, every step falls back to `RetryPolicy.defaultPolicy()` (3 attempts, 1-second fixed delay).
 
 ### MessagePreprocessor SPI
 
