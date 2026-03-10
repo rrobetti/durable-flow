@@ -48,21 +48,18 @@ durable-flow-spring-sample/
 
 ## The workflow
 
-```
-Artemis topic (order.incoming)
-        │  raw JSON
-        ▼
-OrderMessageListener
-        │  engine.receive()  ←── message durably written to DB here
-        ▼
-DurableFlowEngine
-   ┌────┴────┐
-   ▼         ▼           (both steps run in parallel)
-save-order   publish-notification
-   │              │
-   ▼              ▼
-order_records   order.notifications queue
-  (H2 / PG)      (Artemis)
+```mermaid
+flowchart TD
+    A([Artemis topic\norder.incoming]) -->|raw JSON| B[OrderMessageListener]
+    B -->|"engine.receive()\nmessage durably written to DB"| C[DurableFlowEngine]
+    C --> D[save-order]
+    C --> E[publish-notification]
+    D --> F[(order_records\nH2 / PostgreSQL)]
+    E --> G([order.notifications\nArtemis queue])
+
+    style C fill:#f0f4ff,stroke:#4a6cf7
+    style D fill:#e8f5e9,stroke:#388e3c
+    style E fill:#e8f5e9,stroke:#388e3c
 ```
 
 `OrderWorkflow` builds the definition:
