@@ -175,6 +175,83 @@ Each step receives a `StepContext` containing:
 | `previousStepOutputs` | Map of stepName → output bytes from upstream steps |
 | `nodeId` | Identifier of the processing node |
 
+### Lifecycle Hooks
+
+Register `beforeProcessing` and `afterProcessing` hooks on any `WorkflowDefinition`. They run at the very start and end of every workflow run, **regardless of success or failure**, and are invoked by the same thread that executes the steps (calling thread for `SYNCHRONOUS`, background thread for `ASYNCHRONOUS`).
+
+```java
+// User-supplied helpers (examples)
+Logger log = LoggerFactory.getLogger(MyProcessor.class);
+byte[] enrich(byte[] payload)  { /* … */ return payload; }
+void   notify(byte[] data)     { /* … */ }
+
+WorkflowDefinition wf = WorkflowDefinition.builder("order-pipeline")
+    .beforeProcessing(ctx -> {
+        log.info("Starting workflow for message {}", ctx.getMessageId());
+        // ctx.getFinalState() is null here (workflow hasn't run yet)
+    })
+    .step("validate", ctx -> StepResult.empty())
+    .step("enrich",   ctx -> StepResult.withOutput(enrich(ctx.getPayload())))
+        .dependsOn("validate")
+    .step("notify",   ctx -> { notify(ctx.getPreviousStepOutputs().get("enrich")); return StepResult.empty(); })
+        .dependsOn("enrich")
+    .afterProcessing(ctx -> {
+        log.info("Workflow {} ended: state={}", ctx.getWorkflowName(), ctx.getFinalState());
+        // ctx.getFinalState() is PROCESSED / PARKED / IN_PROGRESS / ERROR
+    })
+    .build();
+```
+
+The `WorkflowContext` passed to both hooks exposes:
+
+| Field | `beforeProcessing` | `afterProcessing` |
+|---|---|---|
+| `messageId` | ✓ | ✓ |
+| `workflowName` | ✓ | ✓ |
+| `payload` | ✓ | ✓ |
+| `metadata` | ✓ | ✓ |
+| `nodeId` | ✓ | ✓ |
+| `finalState` | `null` | non-null |
+
+Any exception thrown by a lifecycle hook is **caught and logged** — it never aborts the workflow or affects step execution.
+
+---
+
+### ExecutionMode
+
+Control whether `receive()` blocks on the calling thread or returns immediately:
+
+```java
+// ASYNCHRONOUS (default) — returns MessageState.RECEIVED immediately
+DurableFlowEngine asyncEngine = new DurableFlowEngine(dataSource,
+    DurableFlowConfig.builder()
+        .executionMode(ExecutionMode.ASYNCHRONOUS)  // default; may be omitted
+        .build());
+
+ReceiveResult result = asyncEngine.receive(message, ReceiveOptions.of(workflow));
+// result.messageState() == MessageState.RECEIVED
+// Steps execute in the background thread pool
+
+// SYNCHRONOUS — blocks until all currently-executable steps complete
+DurableFlowEngine syncEngine = new DurableFlowEngine(dataSource,
+    DurableFlowConfig.builder()
+        .executionMode(ExecutionMode.SYNCHRONOUS)
+        .build());
+
+ReceiveResult result = syncEngine.receive(message, ReceiveOptions.of(workflow));
+// result.messageState() == PROCESSED | PARKED | IN_PROGRESS | ERROR
+// Returns only after executeEligibleSteps() finishes on the calling thread
+```
+
+| Mode | Thread | `receive()` return state | Suitable for |
+|---|---|---|---|
+| `ASYNCHRONOUS` (default) | background pool | `RECEIVED` | high-throughput ingest, event-driven |
+| `SYNCHRONOUS` | calling thread | actual final state | request-response, testing, scripts |
+
+> **Note:** Even in `SYNCHRONOUS` mode the recovery scheduler continues to run in the background, and steps blocked on retry windows are not waited for. The returned state may be `IN_PROGRESS` if some steps still have a future `next_retry_at`.
+
+---
+
 ### RetryPolicy
 
 ```java
@@ -401,12 +478,13 @@ Schema differences handled per database:
 
 ```java
 DurableFlowConfig config = DurableFlowConfig.builder()
-    .nodeId("my-node-1")                 // default: random UUID
-    .leaseTimeoutSeconds(60)             // default: 60
-    .recoveryIntervalSeconds(30)         // default: 30
-    .immediateExecutionThreads(4)        // default: 4
-    .schemaAutoMigrate(true)             // default: true
-    .dialect(PostgreSqlDialect.INSTANCE) // default: auto-detected
+    .nodeId("my-node-1")                         // default: random UUID
+    .leaseTimeoutSeconds(60)                     // default: 60
+    .recoveryIntervalSeconds(30)                 // default: 30
+    .immediateExecutionThreads(4)                // default: 4
+    .schemaAutoMigrate(true)                     // default: true
+    .dialect(PostgreSqlDialect.INSTANCE)         // default: auto-detected
+    .executionMode(ExecutionMode.ASYNCHRONOUS)   // default: ASYNCHRONOUS
     .build();
 ```
 
@@ -418,6 +496,7 @@ DurableFlowConfig config = DurableFlowConfig.builder()
 | `immediateExecutionThreads` | 4 | Thread pool size for post-receive step execution |
 | `schemaAutoMigrate` | true | Whether to run Flyway migrations on startup |
 | `dialect` | auto-detected | Override the `DatabaseDialect`; `null` = auto-detect |
+| `executionMode` | `ASYNCHRONOUS` | `SYNCHRONOUS` blocks `receive()` until steps complete; `ASYNCHRONOUS` returns immediately |
 
 ---
 
