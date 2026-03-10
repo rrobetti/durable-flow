@@ -396,20 +396,26 @@ approach when you want strict separation.
 
 ## Execution Mode Selection
 
-Choose the execution mode based on your ingest pattern:
+`receive()` always writes the message to the database and commits the transaction before
+returning — regardless of mode. The message is durable the moment `receive()` returns.
+What the mode controls is **what happens after that database write**:
 
-| Mode | `receive()` returns | Steps execute on | Best for |
-|------|---------------------|-----------------|---------|
-| `ASYNCHRONOUS` (default) | Immediately — `MessageState.RECEIVED` | Background thread pool | High-throughput ingest, event-driven, message consumers |
-| `SYNCHRONOUS` | After all currently-executable steps finish — actual `MessageState` | Calling thread | Request/response REST endpoints, scripts, testing |
+| Mode | After the DB write … | `receive()` returns | Steps execute on | Best for |
+|------|----------------------|---------------------|-----------------|---------|
+| `ASYNCHRONOUS` (default) | Returns immediately | `MessageState.RECEIVED` | Background thread pool | High-throughput ingest, event-driven, message consumers |
+| `SYNCHRONOUS` | Blocks until all currently-executable steps finish | Actual `MessageState` | Calling thread | Request/response REST endpoints, scripts, testing |
 
 ```java
 // ASYNCHRONOUS (default) — ideal for Kafka/RabbitMQ consumers
+// receive() returns as soon as the DB write is committed.
+// The message is already durable — safe to ACK the queue message immediately.
+// Steps then run in the background thread pool.
 DurableFlowConfig.builder()
     .executionMode(ExecutionMode.ASYNCHRONOUS)
     .build();
 
 // SYNCHRONOUS — ideal for REST endpoints where you want the workflow result in the HTTP response
+// receive() blocks until all currently-executable steps complete on the calling thread.
 DurableFlowConfig.builder()
     .executionMode(ExecutionMode.SYNCHRONOUS)
     .build();

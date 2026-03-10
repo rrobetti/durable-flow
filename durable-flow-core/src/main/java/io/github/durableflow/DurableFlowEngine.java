@@ -102,10 +102,42 @@ public class DurableFlowEngine implements Closeable {
      * either synchronously (blocking) or asynchronously depending on
      * {@link DurableFlowConfig#getExecutionMode()}.
      *
-     * <p>In {@link ExecutionMode#SYNCHRONOUS} mode the returned {@link ReceiveResult}
-     * reflects the actual final {@link MessageState} after all currently executable steps
-     * have run. In {@link ExecutionMode#ASYNCHRONOUS} mode (the default) the result always
-     * carries {@link MessageState#RECEIVED} and step execution happens in the background.
+     * <p><strong>What always happens synchronously (before this method returns):</strong>
+     * regardless of the configured execution mode, the message and its steps are written to
+     * the database and the database transaction is committed <em>before</em> this method
+     * returns to the caller. The database connection is also fully closed at that point.
+     * This means the message is durably stored the moment you get a {@link ReceiveResult}
+     * back — it is safe to acknowledge the message to a queue or topic immediately after
+     * this call returns.
+     *
+     * <p><strong>What differs between modes (what happens after the DB write):</strong>
+     * <ul>
+     *   <li>In {@link ExecutionMode#ASYNCHRONOUS} mode (the default) this method returns
+     *       immediately with {@link MessageState#RECEIVED} and step execution is dispatched
+     *       to a background thread pool. The caller does not wait for any step to run.</li>
+     *   <li>In {@link ExecutionMode#SYNCHRONOUS} mode this method blocks on the calling
+     *       thread until all currently-executable steps have run, and returns the actual
+     *       final {@link MessageState} ({@code PROCESSED}, {@code PARKED}, {@code ERROR},
+     *       or {@code IN_PROGRESS} if some steps are still waiting for a retry window).</li>
+     * </ul>
+     *
+     * <p>Example — ASYNCHRONOUS mode (the default):
+     * <pre>{@code
+     * // The message is written to the DB and the transaction committed synchronously.
+     * // receive() then returns immediately — safe to ACK the queue message right here.
+     * ReceiveResult result = engine.receive(message, ReceiveOptions.of(workflow));
+     * // result.messageState() == MessageState.RECEIVED
+     * queue.acknowledge(message);  // safe: message is already durable in the DB
+     * // Steps run in the background thread pool concurrently
+     * }</pre>
+     *
+     * <p>Example — SYNCHRONOUS mode:
+     * <pre>{@code
+     * // The message is written to the DB and then steps execute on this thread.
+     * // receive() blocks until all currently-executable steps have finished.
+     * ReceiveResult result = engine.receive(message, ReceiveOptions.of(workflow));
+     * // result.messageState() == PROCESSED | PARKED | IN_PROGRESS | ERROR
+     * }</pre>
      */
     public ReceiveResult receive(InboundMessage message, ReceiveOptions options) {
         Objects.requireNonNull(message, "message must not be null");
@@ -124,6 +156,10 @@ public class DurableFlowEngine implements Closeable {
         WorkflowDefinition workflow = options.workflow();
         workflowRegistry.register(workflow);
 
+        // Always synchronous: persist the message and its steps to the database and commit.
+        // The connection is fully closed before any step execution begins, ensuring the
+        // message is durable before the caller can acknowledge it to a queue/topic.
+        final String messageId;
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
             try {
@@ -137,21 +173,11 @@ public class DurableFlowEngine implements Closeable {
                     return new ReceiveResult(insertResult.getMessageId(), true, insertResult.getExistingState());
                 }
 
-                String messageId = insertResult.getMessageId();
+                messageId = insertResult.getMessageId();
                 stepRepository.insertSteps(conn, messageId, workflow.getSteps());
                 conn.commit();
 
                 log.debug("Message persisted: id={} workflow={}", messageId, workflow.getName());
-
-                if (config.getExecutionMode() == ExecutionMode.SYNCHRONOUS) {
-                    // Execute steps on the calling thread and return the actual final state
-                    MessageState finalState = orchestrator.executeEligibleSteps(messageId, workflow);
-                    return new ReceiveResult(messageId, false, finalState);
-                } else {
-                    // Best-effort immediate step execution in the background (default)
-                    executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
-                    return new ReceiveResult(messageId, false, MessageState.RECEIVED);
-                }
 
             } catch (Exception e) {
                 conn.rollback();
@@ -159,6 +185,19 @@ public class DurableFlowEngine implements Closeable {
             }
         } catch (SQLException e) {
             throw new RuntimeException("Database connection error", e);
+        }
+
+        // Execute eligible steps: on the calling thread (SYNCHRONOUS) or dispatched to the
+        // background executor (ASYNCHRONOUS). The persistence connection has already been
+        // closed, so it does not compete with execution-time connections.
+        if (config.getExecutionMode() == ExecutionMode.SYNCHRONOUS) {
+            // Execute steps on the calling thread and return the actual final state
+            MessageState finalState = orchestrator.executeEligibleSteps(messageId, workflow);
+            return new ReceiveResult(messageId, false, finalState);
+        } else {
+            // Best-effort immediate step execution in the background (default)
+            executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
+            return new ReceiveResult(messageId, false, MessageState.RECEIVED);
         }
     }
 

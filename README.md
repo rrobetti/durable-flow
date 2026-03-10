@@ -46,7 +46,7 @@ and background recovery — all backed by a relational database.
 - **Lease-based concurrency** — atomic `UPDATE … WHERE step_state IN (…)` prevents double-execution across nodes
 - **Configurable retry policies** — fixed, exponential back-off, jitter; per-step exception classifiers
 - **Background recovery** — expired leases and retryable failures are picked up by a scheduler
-- **Execution modes** — `SYNCHRONOUS` (blocking, returns final state) or `ASYNCHRONOUS` (returns immediately, executes in background thread pool)
+- **Execution modes** — `SYNCHRONOUS` (blocking, returns final state) or `ASYNCHRONOUS` (returns immediately after DB write, executes steps in background thread pool); in both modes the message is durably persisted before `receive()` returns
 - **Lifecycle hooks** — `beforeProcessing` / `afterProcessing` run at the very start and end of every workflow run, regardless of success or failure
 - **Observability** — SLF4J structured logging + `MetricsListener` SPI for your own metrics system
 - **Schema migrations** — Flyway manages the schema automatically on startup for all supported databases
@@ -64,9 +64,12 @@ flowchart TD
     C --> D{Duplicate?}
     D -- yes --> E([ReceiveResult duplicate=true])
     D -- no --> F[INSERT messages\nINSERT message_steps\nINSERT dependencies]
-    F --> G[COMMIT transaction]
-    G --> H[Submit to ExecutorService\nbest-effort]
-    H --> I[WorkflowOrchestrator\nfindEligibleSteps]
+    F --> G[COMMIT & close connection\nmessage is now durable]
+    G --> H{ExecutionMode?}
+    H -- ASYNCHRONOUS --> HA[Submit to ExecutorService\nreturn RECEIVED immediately]
+    H -- SYNCHRONOUS --> HS[Execute steps on calling thread\nreturn final MessageState]
+    HA --> I[WorkflowOrchestrator\nfindEligibleSteps]
+    HS --> I
     J([RecoveryScheduler\nbackground]) --> I
     I --> K[claimStep\natomic UPDATE]
     K --> L[StepHandler.execute]
@@ -220,7 +223,17 @@ Any exception thrown by a lifecycle hook is **caught and logged** — it never a
 
 ### ExecutionMode
 
-Control whether `receive()` blocks on the calling thread or returns immediately:
+`receive()` always writes the message to the database and commits the transaction before
+returning — **in both modes**. The message is durable the moment `receive()` returns,
+regardless of what happens next. It is therefore safe to acknowledge a queue or topic
+message immediately after `receive()` returns.
+
+What the mode controls is **what happens after that database write**:
+
+| Mode | After the DB write … | `receive()` return state | Suitable for |
+|---|---|---|---|
+| `ASYNCHRONOUS` (default) | Returns immediately; steps run in the background thread pool | `RECEIVED` | high-throughput ingest, event-driven, message consumers |
+| `SYNCHRONOUS` | Blocks on the calling thread until all currently-executable steps finish | actual final state | request-response, testing, scripts |
 
 ```java
 // ASYNCHRONOUS (default) — returns MessageState.RECEIVED immediately
@@ -231,7 +244,8 @@ DurableFlowEngine asyncEngine = new DurableFlowEngine(dataSource,
 
 ReceiveResult result = asyncEngine.receive(message, ReceiveOptions.of(workflow));
 // result.messageState() == MessageState.RECEIVED
-// Steps execute in the background thread pool
+// The message is already in the DB — safe to ACK the queue/topic message now.
+// Steps execute in the background thread pool.
 
 // SYNCHRONOUS — blocks until all currently-executable steps complete
 DurableFlowEngine syncEngine = new DurableFlowEngine(dataSource,
@@ -243,11 +257,6 @@ ReceiveResult result = syncEngine.receive(message, ReceiveOptions.of(workflow));
 // result.messageState() == PROCESSED | PARKED | IN_PROGRESS | ERROR
 // Returns only after executeEligibleSteps() finishes on the calling thread
 ```
-
-| Mode | Thread | `receive()` return state | Suitable for |
-|---|---|---|---|
-| `ASYNCHRONOUS` (default) | background pool | `RECEIVED` | high-throughput ingest, event-driven |
-| `SYNCHRONOUS` | calling thread | actual final state | request-response, testing, scripts |
 
 > **Note:** Even in `SYNCHRONOUS` mode the recovery scheduler continues to run in the background, and steps blocked on retry windows are not waited for. The returned state may be `IN_PROGRESS` if some steps still have a future `next_retry_at`.
 
