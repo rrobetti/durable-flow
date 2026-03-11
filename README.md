@@ -1,6 +1,8 @@
 # durable-flow
 
-[![Java](https://img.shields.io/badge/Java-17-blue.svg)](https://openjdk.org/projects/jdk/17/)
+> ⚠️ **ALPHA VERSION** — This project is in early alpha and requires thorough testing before use in production environments.
+
+[![Java](https://img.shields.io/badge/Java-21-blue.svg)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Maven-3.9%2B-blue.svg)](https://maven.apache.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
@@ -85,7 +87,7 @@ flowchart TD
 
 ### Prerequisites
 
-- Java 17+
+- Java 21+
 - Maven 3.9+
 - One of: PostgreSQL 9.5+, Oracle 12c R2+, MySQL 8.0+, MariaDB 10.6+, DB2 LUW 11.1+, SQL Server 2016+
 

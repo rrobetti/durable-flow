@@ -79,12 +79,8 @@ public class DurableFlowEngine implements Closeable {
         this.messageRepository = new JdbcMessageRepository(dataSource, dialect);
         this.stepRepository = new JdbcStepRepository(dataSource, dialect);
         this.workflowRegistry = new WorkflowRegistry();
-        this.executorService = Executors.newFixedThreadPool(config.getImmediateExecutionThreads(),
-                r -> {
-                    Thread t = new Thread(r, "durable-flow-worker");
-                    t.setDaemon(true);
-                    return t;
-                });
+        this.executorService = Executors.newThreadPerTaskExecutor(
+                Thread.ofVirtual().name("durable-flow-worker-", 0).factory());
         this.orchestrator = new WorkflowOrchestrator(
                 dataSource, stepRepository, messageRepository,
                 config, this.metricsListener, executorService);

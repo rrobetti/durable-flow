@@ -56,6 +56,13 @@ public final class DurableFlowConfig {
         return recoveryIntervalSeconds;
     }
 
+    /**
+     * Returns the number of immediate execution threads.
+     *
+     * @deprecated Since Java 21 virtual threads are used, this setting is no longer applied.
+     *             The engine now uses one virtual thread per task, so a fixed pool size is not needed.
+     */
+    @Deprecated
     public int getImmediateExecutionThreads() {
         return immediateExecutionThreads;
     }
@@ -113,6 +120,13 @@ public final class DurableFlowConfig {
             return this;
         }
 
+        /**
+         * Sets the number of threads to use for immediate step execution.
+         *
+         * @deprecated Since Java 21 virtual threads are used, this setting is no longer applied.
+         *             The engine now uses one virtual thread per task, so a fixed pool size is not needed.
+         */
+        @Deprecated
         public Builder immediateExecutionThreads(int threads) {
             if (threads <= 0) throw new IllegalArgumentException("immediateExecutionThreads must be positive");
             this.immediateExecutionThreads = threads;
