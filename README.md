@@ -37,6 +37,7 @@ and background recovery — all backed by a relational database.
 12. [Examples](#examples)
 13. [Running the Tests](#running-the-tests)
 14. [Module Structure](#module-structure)
+15. [Table Partitioning](docs/table-partitioning.md)
 
 ---
 
@@ -383,6 +384,12 @@ The schema is managed by **Flyway** and applied automatically on engine startup 
 | `messages` | One row per unique message |
 | `message_steps` | One row per step per message |
 | `message_step_dependencies` | DAG edges between steps |
+
+> **Performance at scale:** The default schema works well up to tens of millions of rows.
+> For high-volume deployments, time-based range partitioning (monthly or daily) limits
+> scan size and makes old-data archival as simple as dropping a partition.
+> See the [Table Partitioning Guide](docs/table-partitioning.md) for ready-to-use DDL
+> for every supported database.
 
 ### Message States
 
