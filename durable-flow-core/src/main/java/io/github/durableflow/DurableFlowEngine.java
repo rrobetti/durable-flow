@@ -280,6 +280,8 @@ public class DurableFlowEngine implements Closeable {
         Flyway flyway = Flyway.configure()
                 .dataSource(dataSource)
                 .locations(dialect.flywayLocation())
+                .baselineOnMigrate(true)
+                .baselineVersion("0")
                 .load();
         flyway.migrate();
     }
