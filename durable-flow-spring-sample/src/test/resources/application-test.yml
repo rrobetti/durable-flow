@@ -1,8 +1,9 @@
 spring:
   datasource:
     # H2 in-memory database running in PostgreSQL compatibility mode so that
-    # the durable-flow PostgreSQL SQL dialect (ON CONFLICT, TIMESTAMPTZ, BYTEA,
-    # FOR UPDATE SKIP LOCKED, partial indexes) works correctly.
+    # the durable-flow PostgreSQL SQL dialect (ON CONFLICT, TIMESTAMP WITH TIME ZONE,
+    # BYTEA, FOR UPDATE SKIP LOCKED) works correctly. A dedicated H2 migration script
+    # (db/migration/h2) is used because H2 does not support partial indexes.
     url: jdbc:h2:mem:testdb;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
     driver-class-name: org.h2.Driver
     username: sa

@@ -15,6 +15,7 @@ import java.sql.SQLException;
  * <p>Supported auto-detected databases:
  * <ul>
  *   <li>PostgreSQL → {@link PostgreSqlDialect}</li>
+ *   <li>H2 (in-memory, PostgreSQL compatibility mode) → {@link H2Dialect}</li>
  *   <li>Oracle → {@link OracleDialect}</li>
  *   <li>MySQL / MariaDB → {@link MySqlDialect}</li>
  *   <li>IBM DB2 → {@link Db2Dialect}</li>
@@ -52,6 +53,8 @@ public final class DatabaseDialectFactory {
 
         if (lower.contains("postgresql")) {
             dialect = PostgreSqlDialect.INSTANCE;
+        } else if (lower.contains("h2")) {
+            dialect = H2Dialect.INSTANCE;
         } else if (lower.contains("oracle")) {
             dialect = OracleDialect.INSTANCE;
         } else if (lower.contains("mariadb") || lower.contains("mysql")) {
