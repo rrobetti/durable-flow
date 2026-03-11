@@ -1,5 +1,5 @@
 -- Durable Flow initial schema (PostgreSQL 9.5+)
--- Uses TIMESTAMPTZ, BYTEA, TEXT, BOOLEAN, and partial indexes for optimal performance.
+-- Uses TIMESTAMP WITH TIME ZONE, BYTEA, TEXT, BOOLEAN, and partial indexes for optimal performance.
 
 CREATE TABLE messages (
     id               VARCHAR(36)   NOT NULL PRIMARY KEY,
@@ -11,8 +11,8 @@ CREATE TABLE messages (
     payload_ref      VARCHAR(1024),
     message_state    VARCHAR(32)   NOT NULL DEFAULT 'RECEIVED',
     workflow_name    VARCHAR(255),
-    created_at       TIMESTAMPTZ   NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at       TIMESTAMPTZ   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at       TIMESTAMP WITH TIME ZONE   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP WITH TIME ZONE   NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_error       TEXT,
     metadata_json    TEXT,
     CONSTRAINT uq_messages_dedupe UNIQUE (source, dedupe_hash, payload_length)
@@ -28,8 +28,8 @@ CREATE TABLE message_steps (
     step_state        VARCHAR(32)   NOT NULL DEFAULT 'PENDING',
     attempt_count     INTEGER       NOT NULL DEFAULT 0,
     max_attempts      INTEGER       NOT NULL DEFAULT 3,
-    next_retry_at     TIMESTAMPTZ,
-    locked_until      TIMESTAMPTZ,
+    next_retry_at     TIMESTAMP WITH TIME ZONE,
+    locked_until      TIMESTAMP WITH TIME ZONE,
     owner             VARCHAR(255),
     last_error        TEXT,
     result_data       BYTEA,
@@ -37,8 +37,8 @@ CREATE TABLE message_steps (
     retry_multiplier  DOUBLE PRECISION NOT NULL DEFAULT 2.0,
     retry_max_delay_ms BIGINT       NOT NULL DEFAULT 60000,
     retry_jitter      BOOLEAN       NOT NULL DEFAULT FALSE,
-    created_at        TIMESTAMPTZ   NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at        TIMESTAMPTZ   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at        TIMESTAMP WITH TIME ZONE   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP WITH TIME ZONE   NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_message_steps UNIQUE (message_id, step_name)
 );
 
