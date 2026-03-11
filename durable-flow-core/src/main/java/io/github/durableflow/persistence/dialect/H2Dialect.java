@@ -14,8 +14,9 @@ import java.sql.SQLException;
  * <ul>
  *   <li>Insert statements use plain {@code INSERT INTO} without any idempotency clause.
  *       {@link io.github.durableflow.persistence.JdbcMessageRepository} catches the
- *       resulting unique-constraint violation (SQLState {@code 23505} / {@code 23001}) and
- *       returns the existing duplicate record, which is the same behaviour as
+ *       resulting unique-constraint violation (SQLState {@code 23505}, which H2 uses
+ *       in PostgreSQL compatibility mode just like real PostgreSQL) and returns the
+ *       existing duplicate record, achieving the same behaviour as
  *       {@code ON CONFLICT … DO NOTHING} in PostgreSQL.</li>
  *   <li>The Flyway migration location points to {@code db/migration/h2} which uses plain
  *       indexes instead of partial (filtered) indexes not supported by H2.</li>
