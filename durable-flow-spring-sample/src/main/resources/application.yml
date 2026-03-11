@@ -1,0 +1,35 @@
+spring:
+  artemis:
+    # Connect to an external ActiveMQ Artemis broker
+    mode: native
+    broker-url: tcp://localhost:61616
+    user: artemis
+    password: artemis
+
+  datasource:
+    # Production database – replace with your actual JDBC URL, user, and password
+    url: jdbc:postgresql://localhost:5432/orders_db
+    username: orders
+    password: orders
+
+  jpa:
+    hibernate:
+      # Use 'validate' so Hibernate checks that the schema matches the entity
+      # model but does not modify it – your DBA / Flyway owns the schema.
+      # For local dev with H2, switch to 'create-drop' in application-test.yml.
+      ddl-auto: validate
+    open-in-view: false
+
+  # Disable Spring Boot's Flyway auto-configuration.
+  # DurableFlowEngine manages its own Flyway schema migration for the
+  # messages / message_steps / message_step_dependencies tables.
+  # Application tables (order_records) are managed via JPA ddl-auto above.
+  flyway:
+    enabled: false
+
+app:
+  order:
+    # Artemis topic from which order JSON messages are consumed
+    input-topic: order.incoming
+    # Artemis queue to which order-received notifications are published
+    notifications-queue: order.notifications
