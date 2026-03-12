@@ -5,9 +5,9 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.github.durableflow</groupId>
+        <groupId>io.github.rrobetti</groupId>
         <artifactId>durable-flow-parent</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
+        <version>1.0.0-ALPHA</version>
     </parent>
 
     <artifactId>durable-flow-spring-sample</artifactId>
@@ -20,6 +20,7 @@
 
     <properties>
         <spring-boot.version>4.0.3</spring-boot.version>
+        <maven.deploy.skip>true</maven.deploy.skip>
     </properties>
 
     <dependencyManagement>
@@ -37,7 +38,7 @@
     <dependencies>
         <!-- Durable Flow Core -->
         <dependency>
-            <groupId>io.github.durableflow</groupId>
+            <groupId>io.github.rrobetti</groupId>
             <artifactId>durable-flow-core</artifactId>
             <version>${project.version}</version>
         </dependency>

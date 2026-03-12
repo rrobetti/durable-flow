@@ -96,9 +96,9 @@ flowchart TD
 
 ```xml
 <dependency>
-    <groupId>io.github.durableflow</groupId>
+    <groupId>io.github.rrobetti</groupId>
     <artifactId>durable-flow-core</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0-ALPHA</version>
 </dependency>
 ```
 
