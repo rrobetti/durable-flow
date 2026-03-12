@@ -151,7 +151,7 @@
                 </executions>
             </plugin>
             <!--Signs the JARs for deployments-->
-            <plugin>
+            <!--<plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-gpg-plugin</artifactId>
                 <version>3.1.0</version>
@@ -164,7 +164,7 @@
                         </goals>
                     </execution>
                 </executions>
-            </plugin>
+            </plugin>-->
             <!--Deploys to maven central-->
             <plugin>
                 <groupId>org.sonatype.central</groupId>
