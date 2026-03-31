@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  # Gate job: only runs on pull requests. Pauses here until an admin approves
+  # the protected "ci" environment, preventing untrusted code from running tests
+  # automatically. On pushes to main this job is skipped entirely.
+  approve:
+    name: Await admin approval (PRs only)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions: {}
+    environment: ci
+    steps:
+      - name: Approval granted
+        run: echo "Admin approved — proceeding to tests"
+
+  test:
+    name: Unit & Integration Tests
+    needs: approve
+    # Run when 'approve' succeeded (PR, after admin approval) OR when it was
+    # skipped because this is a push to main (no approval required).
+    if: always() && (needs.approve.result == 'success' || needs.approve.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Run unit and integration tests
+        run: mvn -pl durable-flow-core verify
