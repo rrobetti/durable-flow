@@ -14,7 +14,7 @@ transaction management so you can choose the right isolation strategy for your u
 3. [Lifecycle Management](#lifecycle-management)
 4. [Transaction Isolation](#transaction-isolation)
    - [How durable-flow manages transactions](#how-durable-flow-manages-transactions)
-   - [Option A – Shared DataSource (recommended)](#option-a--shared-datasource-recommended)
+   - [Option A – Shared DataSource (simple, no atomicity guarantee)](#option-a--shared-datasource-simple-no-atomicity-guarantee)
    - [Option B – Separate DataSource](#option-b--separate-datasource)
    - [Atomic receive() with an external connection (preferred)](#atomic-receive-with-an-external-connection-preferred)
    - [Guaranteed post-commit dispatch with withDeferredExecution](#guaranteed-post-commit-dispatch-with-withdeferredexecution)
@@ -142,7 +142,7 @@ This is the most important topic when combining durable-flow with Spring Boot.
 
 ### How durable-flow manages transactions
 
-durable-flow **manages all database access through its own JDBC connections**. Every
+By default, durable-flow **manages all database access through its own JDBC connections**. Every
 operation that requires atomicity follows this pattern internally:
 
 ```java
@@ -160,30 +160,37 @@ try (Connection conn = dataSource.getConnection()) {
 
 Key implications:
 
-* durable-flow calls `dataSource.getConnection()` **directly** — it does **not** use
+* By default, durable-flow calls `dataSource.getConnection()` **directly** — it does **not** use
   Spring's `DataSourceUtils.getConnection()` and does **not** participate in any
   `PlatformTransactionManager`-managed transaction.
-* Every durable-flow operation uses its **own dedicated connection** with its own
-  transaction scope, regardless of any active Spring transaction on the calling thread.
+* Every durable-flow operation except `receive()` always uses its **own dedicated connection** with
+  its own transaction scope, regardless of any active Spring transaction on the calling thread.
+* **Exception — `receive()` with an external connection:** when `ReceiveOptions.of(workflow, conn)`
+  or `ReceiveOptions.withDeferredExecution(workflow, conn)` is used, `receive()` uses the
+  caller-supplied connection for the message and step inserts **without committing or closing it**.
+  The caller owns the transaction lifecycle. See
+  [Atomic receive() with an external connection (preferred)](#atomic-receive-with-an-external-connection-preferred)
+  for details.
 * The following discrete transactions exist inside the engine:
 
-| Engine operation | Atomic unit |
-|-----------------|-------------|
-| `receive()` | Insert `messages` + insert `message_steps` + insert `message_step_dependencies` |
-| `claimStep()` | Atomic `UPDATE message_steps WHERE step_state IN ('PENDING','FAILED_RETRYABLE')` |
-| Step success | `UPDATE message_steps SET step_state = 'SUCCEEDED'` + store output |
-| Step failure | `UPDATE message_steps SET step_state = 'FAILED_*'` + record error |
-| State recalculation | `UPDATE messages SET message_state = ...` |
-| `redrive()` | Reset `FAILED_FINAL` steps + set message to `IN_PROGRESS` |
+| Engine operation | Connection used | Atomic unit |
+|-----------------|-----------------|-------------|
+| `receive()` (default) | Engine-internal | Insert `messages` + insert `message_steps` + insert `message_step_dependencies` |
+| `receive()` (external connection) | Caller-provided | Same inserts — caller commits/rolls back |
+| `claimStep()` | Engine-internal | Atomic `UPDATE message_steps WHERE step_state IN ('PENDING','FAILED_RETRYABLE')` |
+| Step success | Engine-internal | `UPDATE message_steps SET step_state = 'SUCCEEDED'` + store output |
+| Step failure | Engine-internal | `UPDATE message_steps SET step_state = 'FAILED_*'` + record error |
+| State recalculation | Engine-internal | `UPDATE messages SET message_state = ...` |
+| `redrive()` | Engine-internal | Reset `FAILED_FINAL` steps + set message to `IN_PROGRESS` |
 
 ---
 
-### Option A – Shared DataSource (recommended)
+### Option A – Shared DataSource (simple, no atomicity guarantee)
 
 Use the same `DataSource` for both your application code (via Spring's
 `PlatformTransactionManager`) and the `DurableFlowEngine`. Because durable-flow
-opens its own connections, the two subsystems operate on **independent connection-level
-transactions** even when sharing the pool.
+opens its own connections by default, the two subsystems operate on **independent
+connection-level transactions** even when sharing the pool.
 
 ```
 Spring @Transactional method                durable-flow engine
@@ -202,9 +209,9 @@ conn-A -> returned to pool                  conn-B -> returned to pool
 * The pool is shared, so total connections are kept bounded.
 
 **Cons:**
-* Business data and workflow state commit in **separate transactions** — see the
-  [atomicity section below](#calling-receive-inside-a-transactional-method) for
-  strategies to handle this.
+* Business data and workflow state commit in **separate transactions** — see
+  [Atomic receive() with an external connection (preferred)](#atomic-receive-with-an-external-connection-preferred)
+  for the recommended way to eliminate this race.
 
 ---
 

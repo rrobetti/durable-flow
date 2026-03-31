@@ -2,6 +2,7 @@
 
 > ⚠️ **ALPHA VERSION** — This project is in early alpha and requires thorough testing before use in production environments.
 
+[![CI](https://github.com/rrobetti/durable-flow/workflows/CI/badge.svg)](https://github.com/rrobetti/durable-flow/actions/workflows/ci.yml)
 [![Java](https://img.shields.io/badge/Java-21-blue.svg)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Maven-3.9%2B-blue.svg)](https://maven.apache.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
@@ -97,15 +98,33 @@ In a traditional transactional outbox pattern, the application writes events to 
 
 durable-flow works differently: the message is persisted **and** the workflow execution begins in the same logical operation. There is no polling loop, no outbox dispatcher, and no lag between saving and processing. The moment `receive()` returns, the message is durable **and** the steps are already running.
 
+You can also pass your own JDBC connection to `receive()` so that the message insertion and your own business writes share a single database transaction:
+
+```java
+// Spring example — message insertion and business save are in the same transaction
+@Transactional
+public String placeOrder(Order order) {
+    orderRepository.save(order);
+    Connection conn = DataSourceUtils.getConnection(dataSource);
+    ReceiveResult result = engine.receive(
+        new InboundMessage("order-service", serialize(order), Map.of()),
+        ReceiveOptions.of(orderWorkflow, conn));
+    // Spring commits conn — both the order save and the message insert are atomic
+    return result.messageId();
+}
+```
+
+See the [Spring Boot Integration guide](docs/spring-boot-integration.md#atomic-receive-with-an-external-connection-preferred) for full details.
+
 ---
 
 ## Learn More
 
 | Topic | Description |
 |---|---|
-| [Core Concepts](docs/core-concepts.md) | InboundMessage, WorkflowDefinition, steps, lifecycle hooks, retry policies, execution modes, deduplication |
+| [Core Concepts](docs/core-concepts.md) | InboundMessage, WorkflowDefinition, steps, lifecycle hooks, retry policies, execution modes, deduplication, external connection |
 | [Configuration Reference](docs/configuration.md) | All config options, persistence, lease management, background recovery, multi-database support, module structure |
-| [Spring Boot Integration](docs/spring-boot-integration.md) | Using durable-flow inside a Spring Boot application |
+| [Spring Boot Integration](docs/spring-boot-integration.md) | Using durable-flow inside a Spring Boot application, including shared-transaction patterns |
 | [Table Partitioning](docs/table-partitioning.md) | High-volume schema partitioning strategies |
 | [Examples](durable-flow-example/) | Runnable examples (sequential, parallel, no-payload) |
 
