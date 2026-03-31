@@ -2,6 +2,7 @@
 
 > ⚠️ **ALPHA VERSION** — This project is in early alpha and requires thorough testing before use in production environments.
 
+[![CI](https://github.com/rrobetti/durable-flow/workflows/CI/badge.svg)](https://github.com/rrobetti/durable-flow/actions/workflows/ci.yml)
 [![Java](https://img.shields.io/badge/Java-21-blue.svg)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Maven-3.9%2B-blue.svg)](https://maven.apache.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
