@@ -261,9 +261,10 @@ The recommended way to guarantee atomicity between your business logic and durab
 message insertion is to pass Spring's current transaction connection directly to `receive()`
 via `ReceiveOptions.of(workflow, connection)`.
 
-When a connection is supplied, durable-flow uses it for all persistence operations
-**without committing or closing it**. Spring commits the connection when the `@Transactional`
-method returns, making both writes atomic in a single database transaction.
+When a connection is supplied, durable-flow uses it for the message and step insertions
+performed inside `receive()` **without committing or closing it**. Spring commits the
+connection when the `@Transactional` method returns, making both writes atomic in a single
+database transaction.
 
 ```java
 import io.github.durableflow.DurableFlowEngine;
@@ -307,6 +308,12 @@ public class OrderService {
 }
 ```
 
+**Duplicate messages with an external connection:**
+When a duplicate is detected, durable-flow returns a `ReceiveResult` with `duplicate() == true`
+**without rolling back the connection**. The connection lifecycle remains entirely under
+Spring's control — Spring will commit the transaction as normal (with no new insert, which
+is harmless). Use `result.duplicate()` to branch your own logic if needed.
+
 **How commit ordering works:**
 durable-flow inserts the message rows using the caller's connection but does **not** commit
 or close it — the caller owns the transaction lifecycle. Step execution is always dispatched
@@ -328,10 +335,10 @@ Because the external transaction has not yet committed there is a small race win
 the background worker finds no visible rows yet and exits cleanly — the recovery scheduler
 then picks the steps up.
 
-If you want to **guarantee** that steps are dispatched only after the external transaction
-is committed and visible, use `ReceiveOptions.withDeferredExecution(workflow, conn)` instead.
-This skips the immediate dispatch entirely; you trigger it yourself from an
-`afterCommit()` callback using `engine.dispatchSteps(messageId, workflow)`.
+For Spring Boot applications, use `ReceiveOptions.withDeferredExecution(workflow, conn)` to
+guarantee that steps are dispatched only after the external transaction is committed and its
+rows are visible to other connections. This skips the immediate dispatch entirely; you trigger
+it yourself from an `afterCommit()` callback using `engine.dispatchSteps(messageId, workflow)`.
 
 ```java
 import io.github.durableflow.DurableFlowEngine;
