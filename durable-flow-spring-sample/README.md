@@ -162,7 +162,6 @@ lease expired before completion.
 
 For stronger atomicity guarantees — ensuring the message insertion and your own business writes
 are committed in a **single database transaction** — pass the Spring-managed connection to
-`receive()` using `ReceiveOptions.of(workflow, conn)` or
-`ReceiveOptions.withDeferredExecution(workflow, conn)`. See the
+`receive()` using `ReceiveOptions.withDeferredExecution(workflow, conn)`. See the
 [Spring Boot Integration guide](../docs/spring-boot-integration.md#atomic-receive-with-an-external-connection-preferred)
 for a complete example.

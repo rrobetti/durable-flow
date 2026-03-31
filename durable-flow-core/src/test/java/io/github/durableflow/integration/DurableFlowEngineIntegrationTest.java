@@ -15,7 +15,7 @@ class DurableFlowEngineIntegrationTest extends BaseIntegrationTest {
     @Test
     void receive_persistsMessageAndReturnsId() {
         WorkflowDefinition wf = singleStepWorkflow("basic", ctx -> StepResult.empty());
-        ReceiveResult result = engine.receive(message("source1", "payload"), ReceiveOptions.of(wf));
+        ReceiveResult result = engine.receive(message("source1", "payload"), ReceiveOptions.withDeferredExecution(wf));
 
         assertNotNull(result.messageId());
         assertFalse(result.duplicate());
@@ -30,7 +30,7 @@ class DurableFlowEngineIntegrationTest extends BaseIntegrationTest {
             return StepResult.empty();
         });
 
-        engine.receive(message("exec-src", "data"), ReceiveOptions.of(wf));
+        engine.receive(message("exec-src", "data"), ReceiveOptions.withDeferredExecution(wf));
         assertTrue(latch.await(10, TimeUnit.SECONDS), "Step should have executed");
     }
 
@@ -42,7 +42,7 @@ class DurableFlowEngineIntegrationTest extends BaseIntegrationTest {
             return StepResult.empty();
         });
 
-        ReceiveResult result = engine.receive(message("status-src", "test"), ReceiveOptions.of(wf));
+        ReceiveResult result = engine.receive(message("status-src", "test"), ReceiveOptions.withDeferredExecution(wf));
         latch.await(10, TimeUnit.SECONDS);
         waitFor(200); // allow state update to propagate
 
@@ -67,9 +67,9 @@ class DurableFlowEngineIntegrationTest extends BaseIntegrationTest {
             return StepResult.empty();
         });
 
-        engine.receive(message("multi-src", "msg1"), ReceiveOptions.of(wf));
-        engine.receive(message("multi-src", "msg2"), ReceiveOptions.of(wf));
-        engine.receive(message("multi-src", "msg3"), ReceiveOptions.of(wf));
+        engine.receive(message("multi-src", "msg1"), ReceiveOptions.withDeferredExecution(wf));
+        engine.receive(message("multi-src", "msg2"), ReceiveOptions.withDeferredExecution(wf));
+        engine.receive(message("multi-src", "msg3"), ReceiveOptions.withDeferredExecution(wf));
 
         assertTrue(latch.await(15, TimeUnit.SECONDS), "All steps should execute");
         assertEquals(3, counter.get());

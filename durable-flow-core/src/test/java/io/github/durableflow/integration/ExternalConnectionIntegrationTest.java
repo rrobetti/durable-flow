@@ -38,7 +38,7 @@ class ExternalConnectionIntegrationTest extends BaseIntegrationTest {
 
             ReceiveResult result = engine.receive(
                     message("ext-src", "payload"),
-                    ReceiveOptions.of(wf, externalConn));
+                    ReceiveOptions.withDeferredExecution(wf, externalConn));
 
             assertNotNull(result.messageId());
             assertFalse(result.duplicate());
@@ -69,7 +69,7 @@ class ExternalConnectionIntegrationTest extends BaseIntegrationTest {
 
             ReceiveResult result = engine.receive(
                     message("rollback-src", "payload"),
-                    ReceiveOptions.of(wf, externalConn));
+                    ReceiveOptions.withDeferredExecution(wf, externalConn));
 
             messageId = result.messageId();
 
@@ -92,7 +92,7 @@ class ExternalConnectionIntegrationTest extends BaseIntegrationTest {
         WorkflowDefinition wf = singleStepWorkflow("ext-dup-test", ctx -> StepResult.empty());
 
         // First receive without an external connection so the record is committed
-        ReceiveResult first = engine.receive(message("dup-src", "dup-payload"), ReceiveOptions.of(wf));
+        ReceiveResult first = engine.receive(message("dup-src", "dup-payload"), ReceiveOptions.withDeferredExecution(wf));
         assertFalse(first.duplicate());
 
         // Second receive of the same message using an external connection
@@ -101,7 +101,7 @@ class ExternalConnectionIntegrationTest extends BaseIntegrationTest {
 
             ReceiveResult dup = engine.receive(
                     message("dup-src", "dup-payload"),
-                    ReceiveOptions.of(wf, externalConn));
+                    ReceiveOptions.withDeferredExecution(wf, externalConn));
 
             assertTrue(dup.duplicate(), "Should be detected as a duplicate");
             assertEquals(first.messageId(), dup.messageId(),

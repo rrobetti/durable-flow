@@ -77,7 +77,7 @@ WorkflowDefinition workflow = WorkflowDefinition.builder("order-processing")
 
 // 3. Receive a message — persisted immediately, workflow starts right away
 InboundMessage message = new InboundMessage("order-service", payloadBytes, headers);
-ReceiveResult result = engine.receive(message, ReceiveOptions.of(workflow));
+ReceiveResult result = engine.receive(message, ReceiveOptions.withDeferredExecution(workflow));
 // The message is already in the database — safe to ACK the queue message now
 System.out.println("Received: " + result.messageId());
 ```
@@ -108,7 +108,7 @@ public String placeOrder(Order order) {
     Connection conn = DataSourceUtils.getConnection(dataSource);
     ReceiveResult result = engine.receive(
         new InboundMessage("order-service", serialize(order), Map.of()),
-        ReceiveOptions.of(orderWorkflow, conn));
+        ReceiveOptions.withDeferredExecution(orderWorkflow, conn));
     // Spring commits conn — both the order save and the message insert are atomic
     return result.messageId();
 }

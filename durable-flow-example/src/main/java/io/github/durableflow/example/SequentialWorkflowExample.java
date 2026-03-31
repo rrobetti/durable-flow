@@ -55,7 +55,7 @@ public class SequentialWorkflowExample {
                 "{\"orderId\":\"ORD-001\",\"amount\":99.99}".getBytes(StandardCharsets.UTF_8),
                 Map.of("content-type", "application/json"));
 
-        ReceiveResult result = engine.receive(message, ReceiveOptions.of(workflow));
+        ReceiveResult result = engine.receive(message, ReceiveOptions.withDeferredExecution(workflow));
         System.out.println("Message received: id=" + result.messageId() +
                 " duplicate=" + result.duplicate());
 

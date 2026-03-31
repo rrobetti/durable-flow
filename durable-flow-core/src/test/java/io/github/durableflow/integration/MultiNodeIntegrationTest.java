@@ -39,7 +39,7 @@ class MultiNodeIntegrationTest extends BaseIntegrationTest {
         engine2.start();
 
         try {
-            engine.receive(message("multi-src", "multi-data"), ReceiveOptions.of(wf));
+            engine.receive(message("multi-src", "multi-data"), ReceiveOptions.withDeferredExecution(wf));
             assertTrue(latch.await(15, TimeUnit.SECONDS), "Step should execute exactly once");
             waitFor(500);
             assertEquals(1, execCount.get(), "Step must execute exactly once across both nodes");
@@ -66,7 +66,7 @@ class MultiNodeIntegrationTest extends BaseIntegrationTest {
         for (int i = 0; i < msgCount; i++) {
             final int idx = i;
             futures.add(senders.submit(() ->
-                    engine.receive(message("conc-src", "payload-" + idx), ReceiveOptions.of(wf))));
+                    engine.receive(message("conc-src", "payload-" + idx), ReceiveOptions.withDeferredExecution(wf))));
         }
         for (Future<?> f : futures) f.get(10, TimeUnit.SECONDS);
         senders.shutdown();

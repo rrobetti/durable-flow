@@ -62,7 +62,7 @@ public class OrderMessageListener {
                 message.getBytes(),
                 Map.of("content-type", "application/json"));
 
-        ReceiveResult result = durableFlowEngine.receive(inbound, ReceiveOptions.of(orderWorkflow));
+        ReceiveResult result = durableFlowEngine.receive(inbound, ReceiveOptions.withDeferredExecution(orderWorkflow));
         log.info("Order message durably stored – messageId={} duplicate={}",
                 result.messageId(), result.duplicate());
     }
