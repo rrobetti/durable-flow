@@ -90,7 +90,13 @@ Any exception thrown by a lifecycle hook is **caught and logged** — it never a
 
 ## ExecutionMode
 
-`receive()` always writes the message to the database and commits the transaction before returning — **in both modes**. The message is durable the moment `receive()` returns, regardless of what happens next.
+`receive()` always writes the message to the database before returning — **in both modes**. When no external connection is supplied (the default), durable-flow opens its own connection, commits the transaction, and closes the connection before returning. The message is durable the moment `receive()` returns, regardless of what happens next.
+
+> **External connection exception:** When `ReceiveOptions.of(workflow, conn)` or
+> `ReceiveOptions.withDeferredExecution(workflow, conn)` is used, the commit is **not**
+> performed inside `receive()`. The caller owns the transaction and must commit (or roll
+> back) the connection after `receive()` returns. See [External Connection](#external-connection)
+> below for details.
 
 What the mode controls is **what happens after that database write**:
 
@@ -184,7 +190,7 @@ public class MyPreprocessor implements MessagePreprocessor {
 }
 
 // Pass to receive options:
-engine.receive(message, new ReceiveOptions(workflow, new MyPreprocessor()));
+engine.receive(message, new ReceiveOptions(workflow, new MyPreprocessor(), null, false));
 ```
 
 ### PayloadStorageMode
@@ -223,3 +229,35 @@ dedupe_hash = XXH3_128(canonicalBytes)  →  32-char lowercase hex string
 ```
 
 The database enforces uniqueness via a `UNIQUE` constraint. When a duplicate is detected, `receive()` returns immediately with `ReceiveResult(duplicate=true)` without inserting new rows.
+
+---
+
+## External Connection
+
+By default, durable-flow manages its own JDBC connection and transaction inside `receive()`.
+You can instead pass an existing `java.sql.Connection` to `receive()` so that the message
+insertion participates in **your own transaction**:
+
+```java
+// Option 1 — immediate dispatch (steps dispatched asynchronously after insert)
+ReceiveOptions opts = ReceiveOptions.of(workflow, conn);
+
+// Option 2 — deferred dispatch (caller triggers step execution from afterCommit hook)
+ReceiveOptions opts = ReceiveOptions.withDeferredExecution(workflow, conn);
+```
+
+When a connection is supplied:
+* durable-flow uses it for all persistence operations inside `receive()` **without committing
+  or closing it**. The caller owns the full transaction lifecycle.
+* If the caller's transaction rolls back, both the business writes and the durable-flow
+  inserts are rolled back atomically — the workflow is never triggered.
+* Step execution is always dispatched **asynchronously** so that steps never start before
+  the external transaction is visible to other connections.
+
+| Factory method | Dispatch timing | Extra caller work |
+|---|---|---|
+| `ReceiveOptions.of(workflow, conn)` | Immediately after insert (may race before commit; recovery scheduler handles it) | None |
+| `ReceiveOptions.withDeferredExecution(workflow, conn)` | Only when caller calls `engine.dispatchSteps(messageId, workflow)` | Register `afterCommit` callback |
+
+See the [Spring Boot Integration guide](../docs/spring-boot-integration.md#atomic-receive-with-an-external-connection-preferred)
+for a full Spring `@Transactional` example using both patterns.

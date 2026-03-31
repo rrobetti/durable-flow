@@ -159,3 +159,10 @@ The JMS listener can therefore acknowledge the broker message immediately — ev
 threads that run `save-order` and `publish-notification` are still in flight or haven't started yet.
 Failures are retried automatically; the background recovery scheduler picks up any steps whose
 lease expired before completion.
+
+For stronger atomicity guarantees — ensuring the message insertion and your own business writes
+are committed in a **single database transaction** — pass the Spring-managed connection to
+`receive()` using `ReceiveOptions.of(workflow, conn)` or
+`ReceiveOptions.withDeferredExecution(workflow, conn)`. See the
+[Spring Boot Integration guide](../docs/spring-boot-integration.md#atomic-receive-with-an-external-connection-preferred)
+for a complete example.
