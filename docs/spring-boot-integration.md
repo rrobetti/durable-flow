@@ -16,8 +16,8 @@ transaction management so you can choose the right isolation strategy for your u
    - [How durable-flow manages transactions](#how-durable-flow-manages-transactions)
    - [Option A – Shared DataSource (recommended)](#option-a--shared-datasource-recommended)
    - [Option B – Separate DataSource](#option-b--separate-datasource)
-   - [Calling receive() inside a @Transactional method](#calling-receive-inside-a-transactional-method)
-   - [Ensuring atomicity with TransactionSynchronizationManager](#ensuring-atomicity-with-transactionsynchronizationmanager)
+   - [Atomic receive() with an external connection (preferred)](#atomic-receive-with-an-external-connection-preferred)
+   - [Guaranteed post-commit dispatch with withDeferredExecution](#guaranteed-post-commit-dispatch-with-withdeferredexecution)
 5. [Flyway Co-existence](#flyway-co-existence)
 6. [Execution Mode Selection](#execution-mode-selection)
 7. [Using Spring Beans inside Step Handlers](#using-spring-beans-inside-step-handlers)
@@ -255,52 +255,27 @@ app:
 
 ---
 
-### Calling receive() inside a @Transactional method
+### Atomic receive() with an external connection (preferred)
 
-Because durable-flow's `receive()` always commits its own connection **before** any
-step execution, there are two important scenarios to consider:
+The recommended way to guarantee atomicity between your business logic and durable-flow's
+message insertion is to pass Spring's current transaction connection directly to `receive()`
+via `ReceiveOptions.of(workflow, connection)`.
 
-#### Scenario 1 — Spring transaction commits after receive() (normal path)
-
-```java
-@Transactional
-public void handleOrder(Order order) {
-    orderRepository.save(order);                  // conn-A (Spring-managed), not yet committed
-    engine.receive(toMessage(order), opts);        // conn-B, COMMITS immediately
-    // ... more business logic ...
-    // Spring commits conn-A here
-}
-```
-
-Timeline:
-1. `engine.receive()` persists the workflow message and **commits** (conn-B).
-2. Steps may already start executing in the background (ASYNCHRONOUS mode).
-3. If the Spring transaction later **rolls back**, the workflow message already exists.
-
-**Effect:** The workflow will execute with a message whose corresponding business record
-was rolled back. Step handlers querying the business database will find nothing for
-this `orderId`.
-
-**Mitigation:** Use `TransactionSynchronizationManager` (see next section) to only
-call `receive()` after the business transaction successfully commits.
-
-#### Scenario 2 — Spring transaction rolls back after receive()
-
-If the business transaction rolls back and durable-flow has already committed the
-message, the deduplication guarantee means a subsequent retry of the same event will be
-detected as a duplicate and skipped. This is safe only if step handlers are written
-to tolerate a missing or inconsistent business record.
-
----
-
-### Ensuring atomicity with TransactionSynchronizationManager
-
-To guarantee that durable-flow only receives a message after the surrounding Spring
-transaction commits successfully, register an `afterCommit` synchronization:
+When a connection is supplied, durable-flow uses it for the message and step insertions
+performed inside `receive()` **without committing or closing it**. Spring commits the
+connection when the `@Transactional` method returns, making both writes atomic in a single
+database transaction.
 
 ```java
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
+import io.github.durableflow.DurableFlowEngine;
+import io.github.durableflow.api.*;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.util.Map;
 
 @Service
 public class OrderService {
@@ -308,40 +283,128 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final DurableFlowEngine engine;
     private final WorkflowDefinition orderWorkflow;
+    private final DataSource dataSource;
 
     // ... constructor injection ...
 
     @Transactional
-    public void placeOrder(Order order) {
+    public String placeOrder(Order order) {
+        // Save business data using the Spring-managed transaction
         orderRepository.save(order);
 
-        // Schedule receive() to run AFTER this transaction commits
+        // Obtain the connection already bound to the current Spring transaction
+        Connection conn = DataSourceUtils.getConnection(dataSource);
+
+        // durable-flow inserts the message using this connection without committing it
+        ReceiveResult result = engine.receive(
+            new InboundMessage("order-service", serialize(order), Map.of()),
+            ReceiveOptions.of(orderWorkflow, conn));
+
+        // Spring commits conn when this method returns — both the business save and
+        // the durable-flow insert are committed atomically.
+        // If an exception occurs, Spring rolls back both writes together.
+        return result.messageId();
+    }
+}
+```
+
+**Duplicate messages with an external connection:**
+When a duplicate is detected, durable-flow returns a `ReceiveResult` with `duplicate() == true`
+**without rolling back the connection**. The connection lifecycle remains entirely under
+Spring's control — Spring will commit the transaction as normal (with no new insert, which
+is harmless). Use `result.duplicate()` to branch your own logic if needed.
+
+**How commit ordering works:**
+durable-flow inserts the message rows using the caller's connection but does **not** commit
+or close it — the caller owns the transaction lifecycle. Step execution is always dispatched
+asynchronously when an external connection is provided, so steps cannot start until after the
+connection is committed and the rows become visible to other connections. If the background
+executor races ahead and finds no visible rows yet (READ_COMMITTED isolation), it simply
+exits cleanly; the recovery scheduler then picks up the committed steps on its next run.
+
+**Behaviour on rollback:**
+If the Spring transaction rolls back, both the business writes and the durable-flow inserts
+are rolled back atomically — the workflow is never triggered.
+
+---
+
+### Guaranteed post-commit dispatch with withDeferredExecution
+
+`ReceiveOptions.of(workflow, conn)` submits step dispatch immediately after the insert.
+Because the external transaction has not yet committed there is a small race window where
+the background worker finds no visible rows yet and exits cleanly — the recovery scheduler
+then picks the steps up.
+
+For Spring Boot applications, use `ReceiveOptions.withDeferredExecution(workflow, conn)` to
+guarantee that steps are dispatched only after the external transaction is committed and its
+rows are visible to other connections. This skips the immediate dispatch entirely; you trigger
+it yourself from an `afterCommit()` callback using `engine.dispatchSteps(messageId, workflow)`.
+
+```java
+import io.github.durableflow.DurableFlowEngine;
+import io.github.durableflow.api.*;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.util.Map;
+
+@Service
+public class OrderService {
+
+    private final OrderRepository orderRepository;
+    private final DurableFlowEngine engine;
+    private final WorkflowDefinition orderWorkflow;
+    private final DataSource dataSource;
+
+    // ... constructor injection ...
+
+    @Transactional
+    public String placeOrder(Order order) {
+        orderRepository.save(order);
+
+        Connection conn = DataSourceUtils.getConnection(dataSource);
+
+        // deferExecution=true: no background dispatch is submitted inside receive()
+        ReceiveResult result = engine.receive(
+            new InboundMessage("order-service", serialize(order), Map.of()),
+            ReceiveOptions.withDeferredExecution(orderWorkflow, conn));
+
+        // Register an after-commit hook that triggers step dispatch once the transaction
+        // is committed and its rows are visible to other database connections.
+        // If the transaction rolls back, afterCommit() is never called — the workflow
+        // is never triggered.
+        String mid = result.messageId();
         TransactionSynchronizationManager.registerSynchronization(
             new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    engine.receive(
-                        new InboundMessage("order-service", serialize(order), Map.of()),
-                        ReceiveOptions.of(orderWorkflow));
+                    engine.dispatchSteps(mid, orderWorkflow);
                 }
             });
+
+        return mid;
     }
 }
 ```
 
 With this pattern:
+* `receive()` persists the message rows using the caller's connection (no commit).
+* If the transaction commits, `afterCommit()` is called and `dispatchSteps()` submits
+  step execution to the background thread pool — steps always start after rows are visible.
+* If the transaction rolls back, `afterCommit()` is **never called** — no steps ever run.
 
-* If the Spring transaction rolls back, `afterCommit()` is **never called** — the
-  workflow is not triggered.
-* If the Spring transaction commits, `afterCommit()` runs and durable-flow persists the
-  workflow message in its own transaction.
-* The small window between the business commit and the durable-flow commit is
-  acceptable for most applications because durable-flow's deduplication ensures
-  idempotency if the event is replayed.
-
-> **Note:** `afterCommit()` is called on the same thread that committed the transaction.
-> In `ASYNCHRONOUS` mode, `receive()` returns quickly; steps run in the background.
-> In `SYNCHRONOUS` mode, `afterCommit()` blocks until all eligible steps complete.
+> **Comparison with `ReceiveOptions.of(workflow, conn)`:**
+> | | `of(workflow, conn)` | `withDeferredExecution(workflow, conn)` |
+> |---|---|---|
+> | Step dispatch timing | Immediately after insert (may race before commit) | Only after caller calls `dispatchSteps()` |
+> | Race-window risk | Yes — harmless (READ_COMMITTED); recovery scheduler handles it | None |
+> | Extra caller code | None | `afterCommit` registration + `dispatchSteps()` call |
+> | Recommended when | Simplest case; recovery interval delay is acceptable | You need guaranteed immediate dispatch after commit |
 
 ---
 
@@ -640,11 +703,12 @@ import io.github.durableflow.DurableFlowEngine;
 import io.github.durableflow.api.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
 import java.time.Duration;
 import java.util.Map;
 
@@ -657,6 +721,7 @@ public class OrderWorkflowService {
     private final InventoryClient   inventoryClient;
     private final NotificationService notificationService;
     private final DurableFlowEngine engine;
+    private final DataSource        dataSource;
     private final ObjectMapper      mapper;
 
     private final WorkflowDefinition workflow;
@@ -665,11 +730,13 @@ public class OrderWorkflowService {
                                 InventoryClient inventoryClient,
                                 NotificationService notificationService,
                                 DurableFlowEngine engine,
+                                DataSource dataSource,
                                 ObjectMapper mapper) {
         this.orderRepository    = orderRepository;
         this.inventoryClient    = inventoryClient;
         this.notificationService = notificationService;
         this.engine             = engine;
+        this.dataSource         = dataSource;
         this.mapper             = mapper;
 
         // Build once; the definition is immutable and thread-safe
@@ -701,28 +768,26 @@ public class OrderWorkflowService {
     }
 
     /**
-     * Saves the order and — only after the business transaction commits —
-     * submits it to the durable-flow engine.
+     * Saves the order and submits it to the durable-flow engine in the same transaction.
+     * If an exception occurs, Spring rolls back both the business save and the workflow
+     * message insertion atomically.
      */
     @Transactional
     public String placeOrder(Order order) {
         orderRepository.save(order);
 
-        // Register a post-commit hook so that receive() is called only if
-        // the business transaction commits successfully.
-        TransactionSynchronizationManager.registerSynchronization(
-            new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    engine.receive(
-                        new InboundMessage(
-                            "order-service",
-                            serialize(order),
-                            Map.of("orderId", order.getId())),
-                        ReceiveOptions.of(workflow));
-                }
-            });
+        // Pass Spring's transaction connection to receive() so that the message insertion
+        // and the business save share a single atomic transaction.
+        Connection conn = DataSourceUtils.getConnection(dataSource);
+        engine.receive(
+            new InboundMessage(
+                "order-service",
+                serialize(order),
+                Map.of("orderId", order.getId())),
+            ReceiveOptions.of(workflow, conn));
 
+        // Spring commits conn when this method returns successfully.
+        // Steps run asynchronously after the transaction is committed.
         return order.getId();
     }
 
@@ -841,7 +906,7 @@ public DurableFlowConfig durableFlowConfig(DurableFlowProperties props) {
 | Scenario | Behaviour | Recommendation |
 |----------|-----------|---------------|
 | `receive()` called outside any Spring transaction | durable-flow commits its own independent transaction | ✅ Safe — simplest approach |
-| `receive()` called inside `@Transactional` | durable-flow commits immediately; business transaction commits later | ⚠️ Use `TransactionSynchronizationManager.afterCommit()` if you need atomicity |
-| Business transaction rolls back after `receive()` | Workflow message is already persisted; steps may execute against missing data | ⚠️ Design step handlers to tolerate missing records, or use `afterCommit()` |
+| `receive()` called with an external connection (`ReceiveOptions.of(wf, conn)`) | durable-flow uses the caller's connection without committing it; both writes are atomic | ✅ **Preferred** — single atomic transaction with your business logic |
+| Business transaction rolls back | Both business writes and workflow insertion are rolled back atomically | ✅ Clean — workflow is never triggered |
 | `SYNCHRONOUS` mode inside `@Transactional` | Calling thread blocks; steps open connections from pool | ⚠️ Size pool to at least `immediateExecutionThreads + 1`; prefer `ASYNCHRONOUS` |
 | Separate DataSource for durable-flow | Complete transaction isolation; no cross-DataSource atomicity | ✅ Cleanest isolation; cross-database atomicity requires XA (rarely needed) |

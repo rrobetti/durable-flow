@@ -117,6 +117,26 @@ public class DurableFlowEngine implements Closeable {
      *       or {@code IN_PROGRESS} if some steps are still waiting for a retry window).</li>
      * </ul>
      *
+     * <p><strong>Using an external JDBC connection ({@link ReceiveOptions#connection()}):</strong>
+     * when a connection is supplied via {@link ReceiveOptions}, durable-flow uses it for all
+     * persistence operations without committing or closing it. This lets the message insertion
+     * and the caller's own business logic share a single database transaction:
+     * <pre>{@code
+     * // Spring example — transactional message listener
+     * @Transactional
+     * public void onMessage(String rawMessage) {
+     *     Connection conn = DataSourceUtils.getConnection(dataSource);
+     *     ReceiveResult result = engine.receive(
+     *         new InboundMessage("my-source", rawMessage.getBytes(), Map.of()),
+     *         ReceiveOptions.of(workflow, conn));
+     *     // Spring commits conn together with the rest of the transaction
+     * }
+     * }</pre>
+     * Step execution is always dispatched asynchronously when an external connection is
+     * provided, because steps must not run before the caller's transaction is committed.
+     * Committed steps will be picked up by the immediate background dispatcher or, as a
+     * fallback, by the recovery scheduler.
+     *
      * <p>Example — ASYNCHRONOUS mode (the default):
      * <pre>{@code
      * // The message is written to the DB and the transaction committed synchronously.
@@ -152,48 +172,83 @@ public class DurableFlowEngine implements Closeable {
         WorkflowDefinition workflow = options.workflow();
         workflowRegistry.register(workflow);
 
-        // Always synchronous: persist the message and its steps to the database and commit.
-        // The connection is fully closed before any step execution begins, ensuring the
-        // message is durable before the caller can acknowledge it to a queue/topic.
         final String messageId;
-        try (Connection conn = dataSource.getConnection()) {
-            conn.setAutoCommit(false);
+        Connection externalConn = options.connection();
+
+        if (externalConn != null) {
+            // Use the caller-provided connection without committing or closing it.
+            // Transaction lifecycle is managed entirely by the caller.
             try {
                 MessageRecord record = buildMessageRecord(message, preprocessed, dedupeHash, payloadLength, workflow);
-                InsertResult insertResult = messageRepository.insertMessage(conn, record);
+                InsertResult insertResult = messageRepository.insertMessage(externalConn, record);
 
                 if (insertResult.isDuplicate()) {
-                    conn.rollback();
                     metricsListener.onDuplicateMessage();
                     log.debug("Duplicate message detected: source={} hash={}", message.source(), dedupeHash);
                     return new ReceiveResult(insertResult.getMessageId(), true, insertResult.getExistingState());
                 }
 
                 messageId = insertResult.getMessageId();
-                stepRepository.insertSteps(conn, messageId, workflow.getSteps());
-                conn.commit();
-
-                log.debug("Message persisted: id={} workflow={}", messageId, workflow.getName());
+                stepRepository.insertSteps(externalConn, messageId, workflow.getSteps());
+                log.debug("Message persisted (external connection): id={} workflow={}", messageId, workflow.getName());
 
             } catch (Exception e) {
-                conn.rollback();
                 throw new RuntimeException("Failed to persist message: " + e.getMessage(), e);
             }
-        } catch (SQLException e) {
-            throw new RuntimeException("Database connection error", e);
-        }
 
-        // Execute eligible steps: on the calling thread (SYNCHRONOUS) or dispatched to the
-        // background executor (ASYNCHRONOUS). The persistence connection has already been
-        // closed, so it does not compete with execution-time connections.
-        if (config.getExecutionMode() == ExecutionMode.SYNCHRONOUS) {
-            // Execute steps on the calling thread and return the actual final state
-            MessageState finalState = orchestrator.executeEligibleSteps(messageId, workflow);
-            return new ReceiveResult(messageId, false, finalState);
-        } else {
-            // Best-effort immediate step execution in the background (default)
-            executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
+            // Steps must be dispatched asynchronously: they cannot run before the caller
+            // commits the external transaction that makes the message and steps visible.
+            // When deferExecution is set the caller is responsible for triggering dispatch
+            // (e.g. from an after-commit callback) via dispatchSteps().
+            if (!options.deferExecution()) {
+                submitSteps(messageId, workflow);
+            }
             return new ReceiveResult(messageId, false, MessageState.RECEIVED);
+
+        } else {
+            // Default path: acquire a connection, persist in a transaction, commit, and release.
+            // Always synchronous: persist the message and its steps to the database and commit.
+            // The connection is fully closed before any step execution begins, ensuring the
+            // message is durable before the caller can acknowledge it to a queue/topic.
+            try (Connection conn = dataSource.getConnection()) {
+                conn.setAutoCommit(false);
+                try {
+                    MessageRecord record = buildMessageRecord(message, preprocessed, dedupeHash, payloadLength, workflow);
+                    InsertResult insertResult = messageRepository.insertMessage(conn, record);
+
+                    if (insertResult.isDuplicate()) {
+                        conn.rollback();
+                        metricsListener.onDuplicateMessage();
+                        log.debug("Duplicate message detected: source={} hash={}", message.source(), dedupeHash);
+                        return new ReceiveResult(insertResult.getMessageId(), true, insertResult.getExistingState());
+                    }
+
+                    messageId = insertResult.getMessageId();
+                    stepRepository.insertSteps(conn, messageId, workflow.getSteps());
+                    conn.commit();
+
+                    log.debug("Message persisted: id={} workflow={}", messageId, workflow.getName());
+
+                } catch (Exception e) {
+                    conn.rollback();
+                    throw new RuntimeException("Failed to persist message: " + e.getMessage(), e);
+                }
+            } catch (SQLException e) {
+                throw new RuntimeException("Database connection error", e);
+            }
+
+            // Execute eligible steps: on the calling thread (SYNCHRONOUS) or dispatched to the
+            // background executor (ASYNCHRONOUS). The persistence connection has already been
+            // closed, so it does not compete with execution-time connections.
+            if (config.getExecutionMode() == ExecutionMode.SYNCHRONOUS) {
+                // Execute steps on the calling thread and return the actual final state
+                MessageState finalState = orchestrator.executeEligibleSteps(messageId, workflow);
+                return new ReceiveResult(messageId, false, finalState);
+            } else {
+                // Best-effort immediate step execution in the background (default)
+                submitSteps(messageId, workflow);
+                return new ReceiveResult(messageId, false, MessageState.RECEIVED);
+            }
         }
     }
 
@@ -248,6 +303,34 @@ public class DurableFlowEngine implements Closeable {
         executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
     }
 
+    /**
+     * Dispatches eligible steps for the given message to the background thread pool.
+     *
+     * <p>This method is intended to be called from an after-commit callback when using an
+     * external connection with {@link ReceiveOptions#withDeferredExecution(WorkflowDefinition, java.sql.Connection)}.
+     * It guarantees that steps are dispatched only after the external transaction has been
+     * committed and its rows are visible to other database connections.
+     *
+     * <pre>{@code
+     * // In a Spring Boot @Transactional method:
+     * TransactionSynchronizationManager.registerSynchronization(
+     *     new TransactionSynchronization() {
+     *         public void afterCommit() {
+     *             engine.dispatchSteps(result.messageId(), workflow);
+     *         }
+     *     });
+     * }</pre>
+     *
+     * @param messageId the ID returned by {@link #receive(InboundMessage, ReceiveOptions)}
+     * @param workflow  the workflow definition associated with the message
+     */
+    public void dispatchSteps(String messageId, WorkflowDefinition workflow) {
+        Objects.requireNonNull(messageId, "messageId must not be null");
+        Objects.requireNonNull(workflow, "workflow must not be null");
+        workflowRegistry.register(workflow);
+        submitSteps(messageId, workflow);
+    }
+
     /** Starts the background recovery scheduler. */
     public void start() {
         if (!started) {
@@ -275,6 +358,10 @@ public class DurableFlowEngine implements Closeable {
     // -------------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------------
+
+    private void submitSteps(String messageId, WorkflowDefinition workflow) {
+        executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
+    }
 
     private static void runMigrations(DataSource dataSource, DatabaseDialect dialect) {
         Flyway flyway = Flyway.configure()
