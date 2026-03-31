@@ -198,7 +198,11 @@ public class DurableFlowEngine implements Closeable {
 
             // Steps must be dispatched asynchronously: they cannot run before the caller
             // commits the external transaction that makes the message and steps visible.
-            executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
+            // When deferExecution is set the caller is responsible for triggering dispatch
+            // (e.g. from an after-commit callback) via dispatchSteps().
+            if (!options.deferExecution()) {
+                submitSteps(messageId, workflow);
+            }
             return new ReceiveResult(messageId, false, MessageState.RECEIVED);
 
         } else {
@@ -242,7 +246,7 @@ public class DurableFlowEngine implements Closeable {
                 return new ReceiveResult(messageId, false, finalState);
             } else {
                 // Best-effort immediate step execution in the background (default)
-                executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
+                submitSteps(messageId, workflow);
                 return new ReceiveResult(messageId, false, MessageState.RECEIVED);
             }
         }
@@ -299,6 +303,34 @@ public class DurableFlowEngine implements Closeable {
         executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
     }
 
+    /**
+     * Dispatches eligible steps for the given message to the background thread pool.
+     *
+     * <p>This method is intended to be called from an after-commit callback when using an
+     * external connection with {@link ReceiveOptions#withDeferredExecution(WorkflowDefinition, java.sql.Connection)}.
+     * It guarantees that steps are dispatched only after the external transaction has been
+     * committed and its rows are visible to other database connections.
+     *
+     * <pre>{@code
+     * // In a Spring Boot @Transactional method:
+     * TransactionSynchronizationManager.registerSynchronization(
+     *     new TransactionSynchronization() {
+     *         public void afterCommit() {
+     *             engine.dispatchSteps(result.messageId(), workflow);
+     *         }
+     *     });
+     * }</pre>
+     *
+     * @param messageId the ID returned by {@link #receive(InboundMessage, ReceiveOptions)}
+     * @param workflow  the workflow definition associated with the message
+     */
+    public void dispatchSteps(String messageId, WorkflowDefinition workflow) {
+        Objects.requireNonNull(messageId, "messageId must not be null");
+        Objects.requireNonNull(workflow, "workflow must not be null");
+        workflowRegistry.register(workflow);
+        submitSteps(messageId, workflow);
+    }
+
     /** Starts the background recovery scheduler. */
     public void start() {
         if (!started) {
@@ -326,6 +358,10 @@ public class DurableFlowEngine implements Closeable {
     // -------------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------------
+
+    private void submitSteps(String messageId, WorkflowDefinition workflow) {
+        executorService.submit(() -> orchestrator.executeEligibleSteps(messageId, workflow));
+    }
 
     private static void runMigrations(DataSource dataSource, DatabaseDialect dialect) {
         Flyway flyway = Flyway.configure()

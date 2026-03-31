@@ -17,6 +17,7 @@ transaction management so you can choose the right isolation strategy for your u
    - [Option A – Shared DataSource (recommended)](#option-a--shared-datasource-recommended)
    - [Option B – Separate DataSource](#option-b--separate-datasource)
    - [Atomic receive() with an external connection (preferred)](#atomic-receive-with-an-external-connection-preferred)
+   - [Guaranteed post-commit dispatch with withDeferredExecution](#guaranteed-post-commit-dispatch-with-withdeferredexecution)
 5. [Flyway Co-existence](#flyway-co-existence)
 6. [Execution Mode Selection](#execution-mode-selection)
 7. [Using Spring Beans inside Step Handlers](#using-spring-beans-inside-step-handlers)
@@ -317,6 +318,86 @@ exits cleanly; the recovery scheduler then picks up the committed steps on its n
 **Behaviour on rollback:**
 If the Spring transaction rolls back, both the business writes and the durable-flow inserts
 are rolled back atomically — the workflow is never triggered.
+
+---
+
+### Guaranteed post-commit dispatch with withDeferredExecution
+
+`ReceiveOptions.of(workflow, conn)` submits step dispatch immediately after the insert.
+Because the external transaction has not yet committed there is a small race window where
+the background worker finds no visible rows yet and exits cleanly — the recovery scheduler
+then picks the steps up.
+
+If you want to **guarantee** that steps are dispatched only after the external transaction
+is committed and visible, use `ReceiveOptions.withDeferredExecution(workflow, conn)` instead.
+This skips the immediate dispatch entirely; you trigger it yourself from an
+`afterCommit()` callback using `engine.dispatchSteps(messageId, workflow)`.
+
+```java
+import io.github.durableflow.DurableFlowEngine;
+import io.github.durableflow.api.*;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.util.Map;
+
+@Service
+public class OrderService {
+
+    private final OrderRepository orderRepository;
+    private final DurableFlowEngine engine;
+    private final WorkflowDefinition orderWorkflow;
+    private final DataSource dataSource;
+
+    // ... constructor injection ...
+
+    @Transactional
+    public String placeOrder(Order order) {
+        orderRepository.save(order);
+
+        Connection conn = DataSourceUtils.getConnection(dataSource);
+
+        // deferExecution=true: no background dispatch is submitted inside receive()
+        ReceiveResult result = engine.receive(
+            new InboundMessage("order-service", serialize(order), Map.of()),
+            ReceiveOptions.withDeferredExecution(orderWorkflow, conn));
+
+        // Register an after-commit hook that triggers step dispatch once the transaction
+        // is committed and its rows are visible to other database connections.
+        // If the transaction rolls back, afterCommit() is never called — the workflow
+        // is never triggered.
+        String mid = result.messageId();
+        TransactionSynchronizationManager.registerSynchronization(
+            new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    engine.dispatchSteps(mid, orderWorkflow);
+                }
+            });
+
+        return mid;
+    }
+}
+```
+
+With this pattern:
+* `receive()` persists the message rows using the caller's connection (no commit).
+* If the transaction commits, `afterCommit()` is called and `dispatchSteps()` submits
+  step execution to the background thread pool — steps always start after rows are visible.
+* If the transaction rolls back, `afterCommit()` is **never called** — no steps ever run.
+
+> **Comparison with `ReceiveOptions.of(workflow, conn)`:**
+> | | `of(workflow, conn)` | `withDeferredExecution(workflow, conn)` |
+> |---|---|---|
+> | Step dispatch timing | Immediately after insert (may race before commit) | Only after caller calls `dispatchSteps()` |
+> | Race-window risk | Yes — harmless (READ_COMMITTED); recovery scheduler handles it | None |
+> | Extra caller code | None | `afterCommit` registration + `dispatchSteps()` call |
+> | Recommended when | Simplest case; recovery interval delay is acceptable | You need guaranteed immediate dispatch after commit |
 
 ---
 

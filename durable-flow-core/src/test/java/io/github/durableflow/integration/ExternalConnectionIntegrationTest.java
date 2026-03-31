@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -16,7 +18,9 @@ import static org.junit.jupiter.api.Assertions.*;
  *   <li>{@code receive()} with an external connection does not commit — the message
  *       remains invisible to other connections until the caller commits;</li>
  *   <li>a rollback on the external connection leaves no trace in the database;</li>
- *   <li>duplicate detection works correctly when an external connection is used.</li>
+ *   <li>duplicate detection works correctly when an external connection is used;</li>
+ *   <li>{@code withDeferredExecution} skips immediate dispatch and steps run only
+ *       after the caller calls {@code dispatchSteps()}.</li>
  * </ul>
  */
 class ExternalConnectionIntegrationTest extends BaseIntegrationTest {
@@ -105,5 +109,70 @@ class ExternalConnectionIntegrationTest extends BaseIntegrationTest {
 
             externalConn.rollback();
         }
+    }
+
+    // ------------------------------------------------------------------
+    // withDeferredExecution — steps dispatched only after explicit trigger
+    // ------------------------------------------------------------------
+
+    @Test
+    void withDeferredExecution_stepsRunAfterDispatchSteps() throws Exception {
+        CountDownLatch latch = new CountDownLatch(1);
+        WorkflowDefinition wf = singleStepWorkflow("deferred-exec-test", ctx -> {
+            latch.countDown();
+            return StepResult.empty();
+        });
+
+        try (Connection externalConn = dataSource.getConnection()) {
+            externalConn.setAutoCommit(false);
+
+            ReceiveResult result = engine.receive(
+                    message("deferred-src", "payload"),
+                    ReceiveOptions.withDeferredExecution(wf, externalConn));
+
+            assertNotNull(result.messageId());
+            assertFalse(result.duplicate());
+
+            // Step should NOT have run yet (no dispatch submitted)
+            assertFalse(latch.await(1, TimeUnit.SECONDS),
+                    "Step should not run before dispatchSteps() is called");
+
+            // Simulate what an afterCommit callback would do: commit then trigger dispatch
+            externalConn.commit();
+            engine.dispatchSteps(result.messageId(), wf);
+
+            // Step should now run
+            assertTrue(latch.await(10, TimeUnit.SECONDS),
+                    "Step should run after dispatchSteps() is called");
+        }
+    }
+
+    @Test
+    void withDeferredExecution_rollback_stepsNeverRun() throws Exception {
+        CountDownLatch latch = new CountDownLatch(1);
+        WorkflowDefinition wf = singleStepWorkflow("deferred-rollback-test", ctx -> {
+            latch.countDown();
+            return StepResult.empty();
+        });
+
+        String messageId;
+        try (Connection externalConn = dataSource.getConnection()) {
+            externalConn.setAutoCommit(false);
+
+            ReceiveResult result = engine.receive(
+                    message("deferred-rb-src", "payload"),
+                    ReceiveOptions.withDeferredExecution(wf, externalConn));
+
+            messageId = result.messageId();
+
+            // Transaction rolls back — caller never calls dispatchSteps()
+            externalConn.rollback();
+        }
+
+        // The message must not exist and the step must never have run
+        waitFor(500);
+        Optional<MessageStatus> status = engine.getMessageStatus(messageId);
+        assertFalse(status.isPresent(), "Message should not exist after rollback");
+        assertFalse(latch.await(1, TimeUnit.SECONDS), "Step should never run when transaction rolled back");
     }
 }
