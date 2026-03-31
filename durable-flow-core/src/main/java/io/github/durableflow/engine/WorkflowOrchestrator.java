@@ -143,35 +143,38 @@ public class WorkflowOrchestrator {
             return false;
         }
 
-        // Execute outside the claim transaction
+        // Execute the step and persist the outcome in a single transaction.
+        // The connection is exposed to the step handler via StepContext, allowing the
+        // handler to participate in the same transaction as the step-state update.
         Instant startTime = Instant.now();
         metricsListener.onStepStarted(def.getName());
-        try {
-            StepContext ctx = buildContext(step, def, workflow);
-            StepResult result = def.getHandler().execute(ctx);
-            byte[] output = result.getOutput().orElse(null);
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            StepContext ctx = buildContext(step, def, workflow, conn);
+            try {
+                StepResult result = def.getHandler().execute(ctx);
+                byte[] output = result.getOutput().orElse(null);
+                stepRepository.markSucceeded(conn, step.getId(), output);
+                conn.commit();
 
-            try (Connection conn = dataSource.getConnection()) {
-                conn.setAutoCommit(false);
+                Duration elapsed = Duration.between(startTime, Instant.now());
+                metricsListener.onStepSucceeded(def.getName(), elapsed);
+                log.debug("Step succeeded: message={} step={} attempt={}",
+                        step.getMessageId(), step.getStepName(), step.getAttemptCount() + 1);
+
+            } catch (Exception e) {
                 try {
-                    stepRepository.markSucceeded(conn, step.getId(), output);
-                    conn.commit();
-                } catch (Exception e) {
                     conn.rollback();
-                    throw e;
+                } catch (SQLException rbEx) {
+                    log.warn("Rollback after step failure failed for step {}", step.getId(), rbEx);
                 }
+                handleStepFailure(step, def, e);
             }
-
-            Duration elapsed = Duration.between(startTime, Instant.now());
-            metricsListener.onStepSucceeded(def.getName(), elapsed);
-            log.debug("Step succeeded: message={} step={} attempt={}",
-                    step.getMessageId(), step.getStepName(), step.getAttemptCount() + 1);
-            return true;
-
-        } catch (Exception e) {
+        } catch (SQLException e) {
+            log.error("DB error executing step {}", step.getId(), e);
             handleStepFailure(step, def, e);
-            return true;
         }
+        return true;
     }
 
     private void handleStepFailure(StepRecord step, StepDefinition def, Exception e) {
@@ -205,7 +208,8 @@ public class WorkflowOrchestrator {
                 step.getMessageId(), step.getStepName(), currentAttempt, retryable, e);
     }
 
-    private StepContext buildContext(StepRecord step, StepDefinition def, WorkflowDefinition workflow) {
+    private StepContext buildContext(StepRecord step, StepDefinition def, WorkflowDefinition workflow,
+                                    Connection connection) {
         // Gather outputs from upstream steps
         List<String> depNames = def.getDependsOn();
         Map<String, byte[]> previousOutputs = Collections.emptyMap();
@@ -223,7 +227,8 @@ public class WorkflowOrchestrator {
                 payload,
                 Collections.emptyMap(),
                 previousOutputs,
-                config.getNodeId());
+                config.getNodeId(),
+                connection);
     }
 
     private byte[] loadPayload(String messageId) {
