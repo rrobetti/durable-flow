@@ -100,19 +100,6 @@ durable-flow works differently: the message is persisted **and** the workflow ex
 
 You can also pass your own JDBC connection to `receive()` so that the message insertion and your own business writes share a single database transaction:
 
-```java
-// Spring example — message insertion and business save are in the same transaction
-@Transactional
-public String placeOrder(Order order) {
-    orderRepository.save(order);
-    Connection conn = DataSourceUtils.getConnection(dataSource);
-    ReceiveResult result = engine.receive(
-        new InboundMessage("order-service", serialize(order), Map.of()),
-        ReceiveOptions.withDeferredExecution(orderWorkflow, conn));
-    // Spring commits conn — both the order save and the message insert are atomic
-    return result.messageId();
-}
-```
 
 See the [Spring Boot Integration guide](docs/spring-boot-integration.md#atomic-receive-with-an-external-connection-preferred) for full details.
 
