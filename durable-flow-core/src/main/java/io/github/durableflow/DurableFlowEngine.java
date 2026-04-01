@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
 import java.io.Closeable;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Instant;
@@ -250,6 +251,37 @@ public class DurableFlowEngine implements Closeable {
                 return new ReceiveResult(messageId, false, MessageState.RECEIVED);
             }
         }
+    }
+
+    /**
+     * Convenience overload of {@link #receive(InboundMessage, ReceiveOptions)} for text payloads.
+     *
+     * <p>The {@code textPayload} string is encoded to bytes using UTF-8 internally, so callers
+     * that receive messages as plain text (e.g. a JMS {@code @JmsListener(String)}) do not need
+     * to perform the conversion themselves:
+     *
+     * <pre>{@code
+     * @JmsListener(destination = "orders")
+     * @Transactional
+     * public void onMessage(String rawMessage) {
+     *     Connection conn = DataSourceUtils.getConnection(dataSource);
+     *     engine.receive("orders", rawMessage, Map.of(),
+     *         ReceiveOptions.withDeferredExecution(orderWorkflow, conn));
+     * }
+     * }</pre>
+     *
+     * @param source      logical source identifier (e.g. queue name, topic)
+     * @param textPayload raw text payload; encoded to UTF-8 bytes before storage
+     * @param headers     optional transport-level headers
+     * @param options     receive options (workflow, optional external connection, etc.)
+     * @return the receive result
+     */
+    public ReceiveResult receive(String source, String textPayload, Map<String, String> headers, ReceiveOptions options) {
+        Objects.requireNonNull(source, "source must not be null");
+        Objects.requireNonNull(textPayload, "textPayload must not be null");
+        return receive(
+                new InboundMessage(source, textPayload.getBytes(StandardCharsets.UTF_8), headers),
+                options);
     }
 
     /**

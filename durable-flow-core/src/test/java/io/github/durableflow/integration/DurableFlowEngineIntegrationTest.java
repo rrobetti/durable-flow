@@ -3,10 +3,12 @@ package io.github.durableflow.integration;
 import io.github.durableflow.api.*;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -73,5 +75,41 @@ class DurableFlowEngineIntegrationTest extends BaseIntegrationTest {
 
         assertTrue(latch.await(15, TimeUnit.SECONDS), "All steps should execute");
         assertEquals(3, counter.get());
+    }
+
+    // ------------------------------------------------------------------
+    // String payload convenience overload
+    // ------------------------------------------------------------------
+
+    @Test
+    void receive_stringPayload_persistsAndExecutesStep() throws Exception {
+        AtomicReference<byte[]> captured = new AtomicReference<>();
+        CountDownLatch latch = new CountDownLatch(1);
+        WorkflowDefinition wf = singleStepWorkflow("str-payload", ctx -> {
+            captured.set(ctx.getPayload());
+            latch.countDown();
+            return StepResult.empty();
+        });
+
+        String text = "hello from queue";
+        ReceiveResult result = engine.receive("orders", text, Map.of("x-src", "test"), ReceiveOptions.withDeferredExecution(wf));
+
+        assertNotNull(result.messageId());
+        assertFalse(result.duplicate());
+        assertTrue(latch.await(10, TimeUnit.SECONDS), "Step should execute");
+        assertEquals(text, new String(captured.get(), java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void receive_stringPayload_deduplication_returnsDuplicate() {
+        WorkflowDefinition wf = singleStepWorkflow("str-dup", ctx -> StepResult.empty());
+
+        String text = "duplicate-text";
+        ReceiveResult first  = engine.receive("src", text, Map.of(), ReceiveOptions.withDeferredExecution(wf));
+        ReceiveResult second = engine.receive("src", text, Map.of(), ReceiveOptions.withDeferredExecution(wf));
+
+        assertFalse(first.duplicate());
+        assertTrue(second.duplicate());
+        assertEquals(first.messageId(), second.messageId());
     }
 }

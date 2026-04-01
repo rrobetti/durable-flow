@@ -288,7 +288,6 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.sql.DataSource;
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.util.Map;
 
@@ -307,10 +306,9 @@ public class OrderQueueListener {
         // Obtain the connection already bound to the current Spring transaction
         Connection conn = DataSourceUtils.getConnection(dataSource);
 
-        // Pass the raw message bytes directly to the workflow — no object conversion needed.
+        // Pass the raw text directly — the engine encodes it to UTF-8 bytes internally.
         // durable-flow inserts the message using this connection without committing it.
-        engine.receive(
-            new InboundMessage("orders", rawMessage.getBytes(StandardCharsets.UTF_8), Map.of()),
+        engine.receive("orders", rawMessage, Map.of(),
             ReceiveOptions.withDeferredExecution(orderWorkflow, conn));
 
         // Spring commits conn when this method returns — the workflow insert and any
@@ -358,7 +356,6 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.sql.DataSource;
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.util.Map;
 
@@ -377,8 +374,8 @@ public class OrderQueueListener {
         Connection conn = DataSourceUtils.getConnection(dataSource);
 
         // deferExecution=true: no background dispatch is submitted inside receive()
-        ReceiveResult result = engine.receive(
-            new InboundMessage("orders", rawMessage.getBytes(StandardCharsets.UTF_8), Map.of()),
+        // The raw text is encoded to UTF-8 bytes internally by the engine.
+        ReceiveResult result = engine.receive("orders", rawMessage, Map.of(),
             ReceiveOptions.withDeferredExecution(orderWorkflow, conn));
 
         // Register an after-commit hook that triggers step dispatch once the transaction
