@@ -10,7 +10,9 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.sql.DataSource;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.util.Map;
 
 /**
  * Spring-aware facade over {@link DurableFlowEngine#receive} that automatically handles
@@ -39,27 +41,23 @@ import java.sql.Connection;
  * private DurableFlowTemplate durableFlow;
  *
  * // Pattern C — atomic insert + guaranteed post-commit dispatch, zero boilerplate
+ * @JmsListener(destination = "${orders.topic}")
  * @Transactional
- * public void placeOrder(Order order) {
- *     orderRepository.save(order);
- *     durableFlow.receive(
- *         new InboundMessage("orders", serialize(order), Map.of()),
- *         orderWorkflowDefinition);
+ * public void onMessage(String rawJson) {
+ *     durableFlow.receive("orders", rawJson, Map.of(), orderWorkflowDefinition);
  *     // afterCommit is registered automatically; workflow never starts on rollback
  * }
  *
  * // Pattern A — no active transaction, engine self-manages
  * @JmsListener(destination = "${orders.topic}")
  * public void onMessage(String rawJson) {
- *     durableFlow.receive(
- *         new InboundMessage("orders", rawJson.getBytes(), Map.of()),
- *         orderWorkflowDefinition);
+ *     durableFlow.receive("orders", rawJson, Map.of(), orderWorkflowDefinition);
  * }
  * }</pre>
  *
  * <p>For the rare Pattern B case (immediate step dispatch inside a transaction, before
  * commit), call {@link DurableFlowEngine#receive} directly with
- * {@link ReceiveOptions#withDeferredExecution(WorkflowDefinition, Connection)}.
+ * {@link ReceiveOptions#of(WorkflowDefinition, Connection)}.
  */
 public class DurableFlowTemplate {
 
@@ -84,6 +82,25 @@ public class DurableFlowTemplate {
             return receiveWithinTransaction(message, workflow);
         }
         return engine.receive(message, ReceiveOptions.withDeferredExecution(workflow));
+    }
+
+    /**
+     * Convenience overload for text payloads — the {@code textPayload} string is encoded
+     * to UTF-8 bytes internally, so callers that receive messages as plain text
+     * (e.g. a JMS {@code @JmsListener(String)}) do not need to perform the conversion
+     * themselves.
+     *
+     * @param source      logical source identifier (e.g. queue name, topic)
+     * @param textPayload raw text payload; encoded to UTF-8 bytes before storage
+     * @param headers     optional transport-level headers
+     * @param workflow    the workflow definition that describes how to process the message
+     * @return the result of the receive operation, including the stable message ID
+     */
+    public ReceiveResult receive(String source, String textPayload,
+                                 Map<String, String> headers, WorkflowDefinition workflow) {
+        return receive(
+                new InboundMessage(source, textPayload.getBytes(StandardCharsets.UTF_8), headers),
+                workflow);
     }
 
     private ReceiveResult receiveWithinTransaction(InboundMessage message, WorkflowDefinition workflow) {

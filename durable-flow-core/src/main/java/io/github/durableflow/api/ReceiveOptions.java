@@ -42,6 +42,26 @@ public record ReceiveOptions(
     }
 
     /**
+     * Creates options that use an external JDBC connection and dispatch steps immediately
+     * (before the external transaction commits).
+     *
+     * <p>This is Pattern B: the engine uses the caller's connection for message persistence,
+     * then submits steps to the background executor immediately — without waiting for the
+     * external transaction to commit.  The steps may start running before the external
+     * transaction is visible to other connections, so this option is generally only safe
+     * when you are certain the message rows will be committed before any step reads them
+     * (e.g. a read-committed isolation level where the step's own connection cannot see
+     * the uncommitted rows).  Prefer
+     * {@link #withDeferredExecution(WorkflowDefinition, Connection)} when in doubt.
+     *
+     * @param workflow   the workflow definition
+     * @param connection the external JDBC connection to use for persistence
+     */
+    public static ReceiveOptions of(WorkflowDefinition workflow, Connection connection) {
+        return new ReceiveOptions(workflow, null, connection, false);
+    }
+
+    /**
      * Creates options that use an external JDBC connection and defer step execution until the
      * caller explicitly triggers it.
      *
@@ -52,11 +72,11 @@ public record ReceiveOptions(
      * rows are visible to other database connections.
      *
      * <pre>{@code
+     * @JmsListener(destination = "orders")
      * @Transactional
-     * public String placeOrder(Order order) {
-     *     orderRepository.save(order);
+     * public void onMessage(String rawMessage) {
      *     Connection conn = DataSourceUtils.getConnection(dataSource);
-     *     ReceiveResult result = engine.receive(msg,
+     *     ReceiveResult result = engine.receive("orders", rawMessage, Map.of(),
      *             ReceiveOptions.withDeferredExecution(workflow, conn));
      *
      *     // Register after-commit trigger — runs only when the transaction commits successfully
@@ -66,7 +86,6 @@ public record ReceiveOptions(
      *                 engine.dispatchSteps(result.messageId(), workflow);
      *             }
      *         });
-     *     return result.messageId();
      * }
      * }</pre>
      *

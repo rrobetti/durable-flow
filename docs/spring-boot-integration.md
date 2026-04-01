@@ -97,16 +97,14 @@ public class OrderMessageListener {
         // Inside @Transactional: DurableFlowTemplate borrows the transaction connection,
         // inserts atomically, and registers afterCommit automatically.
         // If the transaction rolls back, the workflow is never triggered.
-        durableFlow.receive(
-            new InboundMessage("orders", rawJson.getBytes(), Map.of()),
-            orderWorkflow);
+        durableFlow.receive("orders", rawJson, Map.of(), orderWorkflow);
     }
 }
 ```
 
 For the rare Pattern B case (immediate step dispatch inside a transaction, before commit),
 call `DurableFlowEngine#receive` directly with
-`ReceiveOptions.withDeferredExecution(workflow, conn)`.
+`ReceiveOptions.of(workflow, conn)`.
 
 ---
 
@@ -378,14 +376,13 @@ database transaction.
 **With `DurableFlowTemplate` (starter — zero boilerplate):**
 
 ```java
+@PostMapping
 @Transactional
-public String placeOrder(Order order) {
+public ResponseEntity<String> placeOrder(@RequestBody Order order) {
     orderRepository.save(order);
-    durableFlow.receive(
-        new InboundMessage("order-service", serialize(order), Map.of()),
-        orderWorkflow);
+    ReceiveResult result = durableFlow.receive("order-service", serialize(order), Map.of(), orderWorkflow);
     // afterCommit registered automatically; steps dispatched after TX commits
-    return order.getId();
+    return ResponseEntity.accepted().body(result.messageId());
 }
 ```
 
@@ -397,8 +394,8 @@ public String placeOrder(Order order) {
 public void onMessage(String rawMessage) {
     Connection conn = DataSourceUtils.getConnection(dataSource);
     engine.receive("orders", rawMessage, Map.of(),
-        ReceiveOptions.withDeferredExecution(orderWorkflow, conn));
-    // Spring commits conn when this method returns
+        ReceiveOptions.of(orderWorkflow, conn));
+    // Steps dispatched immediately; Spring commits conn when this method returns
 }
 ```
 
@@ -522,7 +519,7 @@ durable-flow:
 ## Using Spring Beans inside Step Handlers
 
 Step handlers are plain Java lambdas or method references. To use Spring-managed beans
-inside a step handler, inject them into the surrounding `@Service` or `@Component` and
+inside a step handler, inject them into the surrounding `@Configuration` class and
 close over the references:
 
 ```java
@@ -729,20 +726,27 @@ public class OrderWorkflow {
 }
 ```
 
-### 3. Service
+### 3. REST Controller
 
 ```java
-// OrderWorkflowService.java
-@Service
-public class OrderWorkflowService {
+// OrderController.java
+import io.github.durableflow.api.*;
+import io.github.durableflow.spring.DurableFlowTemplate;
+import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/orders")
+public class OrderController {
 
     private final OrderRepository orderRepository;
     private final DurableFlowTemplate durableFlow;
     private final WorkflowDefinition orderWorkflowDefinition;
 
-    public OrderWorkflowService(OrderRepository orderRepository,
-                                DurableFlowTemplate durableFlow,
-                                WorkflowDefinition orderWorkflowDefinition) {
+    public OrderController(OrderRepository orderRepository,
+                           DurableFlowTemplate durableFlow,
+                           WorkflowDefinition orderWorkflowDefinition) {
         this.orderRepository        = orderRepository;
         this.durableFlow            = durableFlow;
         this.orderWorkflowDefinition = orderWorkflowDefinition;
@@ -753,43 +757,22 @@ public class OrderWorkflowService {
      * DurableFlowTemplate registers the afterCommit hook automatically — steps are
      * dispatched only after the transaction commits successfully.
      */
+    @PostMapping
     @Transactional
-    public String placeOrder(Order order) {
+    public ResponseEntity<String> placeOrder(@RequestBody Order order) {
         orderRepository.save(order);
 
-        durableFlow.receive(
-            new InboundMessage("order-service", serialize(order),
-                Map.of("orderId", order.getId())),
+        ReceiveResult result = durableFlow.receive(
+            "order-service", serialize(order),
+            Map.of("orderId", order.getId()),
             orderWorkflowDefinition);
 
-        return order.getId();
+        return ResponseEntity.accepted().body(result.messageId());
     }
 }
 ```
 
-### 4. REST Controller
-
-```java
-// OrderController.java
-@RestController
-@RequestMapping("/orders")
-public class OrderController {
-
-    private final OrderWorkflowService orderService;
-
-    public OrderController(OrderWorkflowService orderService) {
-        this.orderService = orderService;
-    }
-
-    @PostMapping
-    public ResponseEntity<String> placeOrder(@RequestBody Order order) {
-        String orderId = orderService.placeOrder(order);
-        return ResponseEntity.accepted().body(orderId);
-    }
-}
-```
-
-### 5. application.yml
+### 4. application.yml
 
 ```yaml
 spring:

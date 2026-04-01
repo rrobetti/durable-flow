@@ -1,6 +1,5 @@
 package io.github.durableflow.sample.listener;
 
-import io.github.durableflow.api.InboundMessage;
 import io.github.durableflow.api.ReceiveResult;
 import io.github.durableflow.api.WorkflowDefinition;
 import io.github.durableflow.spring.DurableFlowTemplate;
@@ -9,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jms.annotation.JmsListener;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Map;
 
@@ -17,10 +17,10 @@ import java.util.Map;
  * hands each message off to the {@link DurableFlowTemplate} for durable, fault-tolerant
  * processing.
  *
- * <p>Because there is no active Spring transaction on the JMS listener thread,
- * {@link DurableFlowTemplate#receive} delegates to the engine's self-managed path:
- * the message is persisted and the transaction is committed before this method returns,
- * making it safe to acknowledge the JMS message to the broker immediately.
+ * <p>Because the listener is annotated with {@code @Transactional},
+ * {@link DurableFlowTemplate#receive} borrows the transaction connection, inserts the
+ * message atomically, and registers an {@code afterCommit} hook that dispatches steps
+ * only after the transaction commits successfully.
  *
  * <p>Step execution (publish-notification &amp; save-order) then proceeds in the
  * engine's background thread pool.
@@ -43,9 +43,8 @@ public class OrderMessageListener {
     }
 
     /**
-     * Receives a raw JSON string from the order topic, wraps it in an
-     * {@link InboundMessage}, and submits it to the durable-flow engine via
-     * {@link DurableFlowTemplate}.
+     * Receives a raw JSON string from the order topic and submits it to the durable-flow
+     * engine via {@link DurableFlowTemplate}.
      *
      * <p>The {@code topicListenerFactory} bean (defined in
      * {@link io.github.durableflow.sample.config.JmsConfig}) enables pub/sub (topic) mode.
@@ -55,15 +54,16 @@ public class OrderMessageListener {
     @JmsListener(
             destination = "${app.order.input-topic}",
             containerFactory = "topicListenerFactory")
+    @Transactional
     public void onMessage(String message) {
         log.debug("Received raw order message from topic");
 
-        InboundMessage inbound = new InboundMessage(
+        ReceiveResult result = durableFlowTemplate.receive(
                 inputTopic,
-                message.getBytes(),
-                Map.of("content-type", "application/json"));
+                message,
+                Map.of("content-type", "application/json"),
+                orderWorkflow);
 
-        ReceiveResult result = durableFlowTemplate.receive(inbound, orderWorkflow);
         log.info("Order message durably stored – messageId={} duplicate={}",
                 result.messageId(), result.duplicate());
     }
