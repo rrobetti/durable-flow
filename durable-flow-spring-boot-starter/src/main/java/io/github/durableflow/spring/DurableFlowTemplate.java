@@ -1,6 +1,8 @@
 package io.github.durableflow.spring;
 
+import io.github.durableflow.DurableFlowConfig;
 import io.github.durableflow.DurableFlowEngine;
+import io.github.durableflow.api.ExecutionMode;
 import io.github.durableflow.api.InboundMessage;
 import io.github.durableflow.api.ReceiveOptions;
 import io.github.durableflow.api.ReceiveResult;
@@ -19,20 +21,30 @@ import java.util.Map;
  * transaction integration.
  *
  * <p>Use this bean instead of calling {@code engine.receive()} directly.  It inspects the
- * current thread's transaction state and chooses the correct receive strategy:
+ * current thread's transaction state and the configured {@link ExecutionMode}, then chooses
+ * the correct receive strategy:
  *
  * <ul>
- *   <li><b>Inside a {@code @Transactional} method</b> — borrows the connection already bound
- *       to the active transaction, calls
- *       {@link ReceiveOptions#withDeferredExecution(WorkflowDefinition, Connection)} so the
- *       durable-flow insert is atomically part of the surrounding transaction, and registers
- *       an {@code afterCommit} synchronization that calls
- *       {@link DurableFlowEngine#dispatchSteps} only after the transaction commits
- *       successfully.  If the transaction rolls back, neither the insert nor the dispatch
- *       ever happens.</li>
- *   <li><b>Outside any transaction</b> — delegates to
+ *   <li><b>Outside any transaction (any mode)</b> — delegates to
  *       {@link ReceiveOptions#withDeferredExecution(WorkflowDefinition)} so the engine manages
- *       its own connection, commits the insert, and dispatches steps immediately.</li>
+ *       its own connection, commits the insert, and dispatches steps immediately (asynchronously)
+ *       or runs them on the calling thread (synchronously).</li>
+ *   <li><b>Inside a {@code @Transactional} method — {@link ExecutionMode#ASYNCHRONOUS} mode
+ *       (default)</b> — borrows the connection already bound to the active transaction so the
+ *       durable-flow insert is atomically part of the surrounding transaction, and registers an
+ *       {@code afterCommit} synchronization that calls {@link DurableFlowEngine#dispatchSteps}
+ *       only after the transaction commits successfully.  If the transaction rolls back, neither
+ *       the insert nor the dispatch ever happens.</li>
+ *   <li><b>Inside a {@code @Transactional} method — {@link ExecutionMode#SYNCHRONOUS} mode</b>
+ *       — the outer transaction is intentionally bypassed.  The engine opens its own JDBC
+ *       connection, persists and commits the message independently, and then runs all eligible
+ *       steps on the calling thread before returning.  This gives the caller a fully-resolved
+ *       {@link io.github.durableflow.api.MessageState} immediately after {@code receive()}
+ *       returns.
+ *       <br><em>Note:</em> because the message is committed in a separate transaction, a
+ *       subsequent rollback of the outer transaction will <strong>not</strong> undo the message
+ *       insert.  If transactional atomicity between your business write and the workflow trigger
+ *       matters, use {@link ExecutionMode#ASYNCHRONOUS} mode instead.</li>
  * </ul>
  *
  * <p>Example usage:
@@ -40,7 +52,7 @@ import java.util.Map;
  * @Autowired
  * private DurableFlowTemplate durableFlow;
  *
- * // Pattern C — atomic insert + guaranteed post-commit dispatch, zero boilerplate
+ * // ASYNCHRONOUS mode (default) — atomic insert + guaranteed post-commit dispatch
  * @JmsListener(destination = "${orders.topic}")
  * @Transactional
  * public void onMessage(String rawJson) {
@@ -48,25 +60,28 @@ import java.util.Map;
  *     // afterCommit is registered automatically; workflow never starts on rollback
  * }
  *
- * // Pattern A — no active transaction, engine self-manages
- * @JmsListener(destination = "${orders.topic}")
- * public void onMessage(String rawJson) {
- *     durableFlow.receive("orders", rawJson, Map.of(), orderWorkflowDefinition);
+ * // SYNCHRONOUS mode — steps run on the calling thread; outer transaction is bypassed
+ * @PostMapping("/orders")
+ * @Transactional
+ * public ResponseEntity<String> placeOrder(@RequestBody String rawJson) {
+ *     ReceiveResult result = durableFlow.receive("orders", rawJson, Map.of(), orderWorkflowDefinition);
+ *     // receive() blocks until all steps have finished; result.messageState() is the final state
+ *     return result.messageState() == MessageState.SUCCEEDED
+ *         ? ResponseEntity.ok(result.messageId())
+ *         : ResponseEntity.internalServerError().body("Workflow ended in state: " + result.messageState());
  * }
  * }</pre>
- *
- * <p>For the rare Pattern B case (immediate step dispatch inside a transaction, before
- * commit), call {@link DurableFlowEngine#receive} directly with
- * {@link ReceiveOptions#of(WorkflowDefinition, Connection)}.
  */
 public class DurableFlowTemplate {
 
     private final DurableFlowEngine engine;
     private final DataSource dataSource;
+    private final DurableFlowConfig config;
 
-    public DurableFlowTemplate(DurableFlowEngine engine, DataSource dataSource) {
+    public DurableFlowTemplate(DurableFlowEngine engine, DataSource dataSource, DurableFlowConfig config) {
         this.engine = engine;
         this.dataSource = dataSource;
+        this.config = config;
     }
 
     /**
@@ -78,7 +93,8 @@ public class DurableFlowTemplate {
      * @return the result of the receive operation, including the stable message ID
      */
     public ReceiveResult receive(InboundMessage message, WorkflowDefinition workflow) {
-        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()
+                && config.getExecutionMode() != ExecutionMode.SYNCHRONOUS) {
             return receiveWithinTransaction(message, workflow);
         }
         return engine.receive(message, ReceiveOptions.withDeferredExecution(workflow));

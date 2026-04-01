@@ -481,12 +481,19 @@ durable-flow:
   execution-mode: ASYNCHRONOUS   # or SYNCHRONOUS
 ```
 
-> **Important for `SYNCHRONOUS` mode inside `@Transactional`:** The calling thread
-> blocks until all steps complete. Those steps open their own connections from the pool.
-> If the pool is sized too small, and the calling thread holds a connection while waiting
-> for steps that also need connections, you risk a **deadlock**. Size the pool to at
-> least `immediateExecutionThreads + 1` connections, or use `ASYNCHRONOUS` mode
-> inside `@Transactional` methods.
+> **`SYNCHRONOUS` mode inside `@Transactional`:** `DurableFlowTemplate` intentionally bypasses
+> the outer transaction in this case. The engine opens its own JDBC connection, commits the
+> message insert independently, and then runs all steps on the calling thread before
+> `receive()` returns — giving you a fully-resolved `MessageState` immediately.
+> Because the insert is committed in a separate transaction, a rollback of the outer
+> transaction **will not** undo the message. If you need the message insert to be atomic
+> with your business write, use `ASYNCHRONOUS` mode and rely on the post-commit dispatch
+> instead.
+>
+> **Connection pool sizing:** those steps open their own connections from the pool while
+> the calling thread is still running. Ensure the pool has enough connections
+> (`maximumPoolSize` ≥ number of concurrent requests + overhead) to avoid exhaustion.
+> See [Execution Mode Selection](#execution-mode-selection) for details.
 
 ---
 
