@@ -14,6 +14,7 @@ code never has to manage JDBC connections, `afterCommit` hooks, or engine lifecy
 3. [Submitting Messages with DurableFlowTemplate](#submitting-messages-with-durableflowtemplate)
    - [Inside a @Transactional listener or controller](#inside-a-transactional-listener-or-controller)
    - [Transaction safety guarantees](#transaction-safety-guarantees)
+   - [Synchronous execution — wait for all steps before responding](#synchronous-execution--wait-for-all-steps-before-responding)
    - [Duplicate messages](#duplicate-messages)
 4. [Overriding individual auto-configured beans](#overriding-individual-auto-configured-beans)
 5. [Manual wiring (without the starter)](#manual-wiring-without-the-starter)
@@ -165,7 +166,6 @@ public class OrderMessageListener {
 @RequestMapping("/orders")
 public class OrderController {
 
-    private final OrderRepository orderRepository;
     private final DurableFlowTemplate durableFlow;
     private final WorkflowDefinition orderWorkflowDefinition;
 
@@ -173,16 +173,18 @@ public class OrderController {
 
     @PostMapping
     @Transactional
-    public ResponseEntity<String> placeOrder(@RequestBody Order order) {
-        orderRepository.save(order);
+    public ResponseEntity<String> placeOrder(@RequestBody String rawJson) {
         ReceiveResult result = durableFlow.receive(
-            "order-service", serialize(order),
-            Map.of("orderId", order.getId()),
+            "order-service", rawJson,
+            Map.of(),
             orderWorkflowDefinition);
         return ResponseEntity.accepted().body(result.messageId());
     }
 }
 ```
+
+> The raw JSON string is passed directly to the workflow as the payload — deserialisation and
+> any persistence belong inside the workflow steps, not in the controller.
 
 When called outside any `@Transactional` context the template falls back to having the engine
 manage its own connection — the message is persisted and steps are dispatched immediately after
@@ -205,6 +207,56 @@ When a duplicate is detected, `receive()` returns a `ReceiveResult` with `duplic
 **without rolling back the connection**. The connection lifecycle remains under Spring's control —
 the transaction commits normally (with no new insert, which is harmless). Use `result.duplicate()`
 to branch your own logic if needed.
+
+### Synchronous execution — wait for all steps before responding
+
+By default the engine dispatches steps asynchronously and `receive()` returns immediately after
+persisting the message. When you need the controller or listener to wait until **all workflow
+steps have completed** before sending a response (for example, a REST endpoint that must return
+the processing outcome), switch to `SYNCHRONOUS` execution mode:
+
+```yaml
+# application.yml
+durable-flow:
+  execution-mode: SYNCHRONOUS
+```
+
+```java
+@RestController
+@RequestMapping("/orders")
+public class OrderController {
+
+    private final DurableFlowTemplate durableFlow;
+    private final WorkflowDefinition orderWorkflowDefinition;
+
+    // ... constructor injection ...
+
+    /**
+     * Submits the order payload and blocks until all workflow steps complete.
+     * The response is sent only after the full workflow has run on the calling thread.
+     */
+    @PostMapping
+    public ResponseEntity<String> placeOrder(@RequestBody String rawJson) {
+        ReceiveResult result = durableFlow.receive(
+            "order-service", rawJson,
+            Map.of(),
+            orderWorkflowDefinition);
+
+        // With SYNCHRONOUS mode, receive() only returns after all steps have finished.
+        // result.messageState() reflects the final state (SUCCEEDED, FAILED, etc.)
+        if (result.messageState() == MessageState.SUCCEEDED) {
+            return ResponseEntity.ok(result.messageId());
+        } else {
+            return ResponseEntity.internalServerError().body("Workflow ended in state: " + result.messageState());
+        }
+    }
+}
+```
+
+> **Connection pool sizing:** in `SYNCHRONOUS` mode the calling thread runs steps directly
+> and may open additional connections from the pool. Ensure the pool has enough connections
+> (`maximumPoolSize` ≥ number of concurrent requests + overhead) to avoid deadlocks.
+> See [Execution Mode Selection](#execution-mode-selection) for details.
 
 ---
 
@@ -662,31 +714,27 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/orders")
 public class OrderController {
 
-    private final OrderRepository orderRepository;
     private final DurableFlowTemplate durableFlow;
     private final WorkflowDefinition orderWorkflowDefinition;
 
-    public OrderController(OrderRepository orderRepository,
-                           DurableFlowTemplate durableFlow,
+    public OrderController(DurableFlowTemplate durableFlow,
                            WorkflowDefinition orderWorkflowDefinition) {
-        this.orderRepository        = orderRepository;
         this.durableFlow            = durableFlow;
         this.orderWorkflowDefinition = orderWorkflowDefinition;
     }
 
     /**
-     * Saves the order and submits it to the durable-flow engine in the same transaction.
+     * Accepts raw JSON, submits it to the durable-flow engine.
      * DurableFlowTemplate registers the afterCommit hook automatically — steps are
      * dispatched only after the transaction commits successfully.
+     * Deserialisation and persistence belong inside the workflow steps.
      */
     @PostMapping
     @Transactional
-    public ResponseEntity<String> placeOrder(@RequestBody Order order) {
-        orderRepository.save(order);
-
+    public ResponseEntity<String> placeOrder(@RequestBody String rawJson) {
         ReceiveResult result = durableFlow.receive(
-            "order-service", serialize(order),
-            Map.of("orderId", order.getId()),
+            "order-service", rawJson,
+            Map.of(),
             orderWorkflowDefinition);
 
         return ResponseEntity.accepted().body(result.messageId());
