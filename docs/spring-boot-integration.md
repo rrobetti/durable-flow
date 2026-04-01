@@ -273,44 +273,49 @@ performed inside `receive()` **without committing or closing it**. Spring commit
 connection when the `@Transactional` method returns, making both writes atomic in a single
 database transaction.
 
+This pattern is especially well-suited for queue or topic listeners, where the message
+arrives as raw text that should be handed directly to the workflow without any intermediate
+object conversion. The workflow is the entry point for the full processing of the request —
+there is no reason to deserialize the text into a domain object only to serialize it back
+into bytes for the engine.
+
 ```java
 import io.github.durableflow.DurableFlowEngine;
 import io.github.durableflow.api.*;
 import org.springframework.jdbc.datasource.DataSourceUtils;
-import org.springframework.stereotype.Service;
+import org.springframework.jms.annotation.JmsListener;
+import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.sql.DataSource;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.util.Map;
 
-@Service
-public class OrderService {
+@Component
+public class OrderQueueListener {
 
-    private final OrderRepository orderRepository;
     private final DurableFlowEngine engine;
     private final WorkflowDefinition orderWorkflow;
     private final DataSource dataSource;
 
     // ... constructor injection ...
 
+    @JmsListener(destination = "orders")
     @Transactional
-    public String placeOrder(Order order) {
-        // Save business data using the Spring-managed transaction
-        orderRepository.save(order);
-
+    public void onMessage(String rawMessage) {
         // Obtain the connection already bound to the current Spring transaction
         Connection conn = DataSourceUtils.getConnection(dataSource);
 
-        // durable-flow inserts the message using this connection without committing it
-        ReceiveResult result = engine.receive(
-            new InboundMessage("order-service", serialize(order), Map.of()),
+        // Pass the raw message bytes directly to the workflow — no object conversion needed.
+        // durable-flow inserts the message using this connection without committing it.
+        engine.receive(
+            new InboundMessage("orders", rawMessage.getBytes(StandardCharsets.UTF_8), Map.of()),
             ReceiveOptions.withDeferredExecution(orderWorkflow, conn));
 
-        // Spring commits conn when this method returns — both the business save and
-        // the durable-flow insert are committed atomically.
-        // If an exception occurs, Spring rolls back both writes together.
-        return result.messageId();
+        // Spring commits conn when this method returns — the workflow insert and any
+        // other business writes are committed atomically.
+        // If an exception occurs, Spring rolls back all writes together.
     }
 }
 ```
@@ -346,34 +351,34 @@ after the external transaction is committed and its rows are visible to other co
 import io.github.durableflow.DurableFlowEngine;
 import io.github.durableflow.api.*;
 import org.springframework.jdbc.datasource.DataSourceUtils;
-import org.springframework.stereotype.Service;
+import org.springframework.jms.annotation.JmsListener;
+import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.sql.DataSource;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.util.Map;
 
-@Service
-public class OrderService {
+@Component
+public class OrderQueueListener {
 
-    private final OrderRepository orderRepository;
     private final DurableFlowEngine engine;
     private final WorkflowDefinition orderWorkflow;
     private final DataSource dataSource;
 
     // ... constructor injection ...
 
+    @JmsListener(destination = "orders")
     @Transactional
-    public String placeOrder(Order order) {
-        orderRepository.save(order);
-
+    public void onMessage(String rawMessage) {
         Connection conn = DataSourceUtils.getConnection(dataSource);
 
         // deferExecution=true: no background dispatch is submitted inside receive()
         ReceiveResult result = engine.receive(
-            new InboundMessage("order-service", serialize(order), Map.of()),
+            new InboundMessage("orders", rawMessage.getBytes(StandardCharsets.UTF_8), Map.of()),
             ReceiveOptions.withDeferredExecution(orderWorkflow, conn));
 
         // Register an after-commit hook that triggers step dispatch once the transaction
@@ -388,8 +393,6 @@ public class OrderService {
                     engine.dispatchSteps(mid, orderWorkflow);
                 }
             });
-
-        return mid;
     }
 }
 ```
