@@ -110,7 +110,8 @@ public class DurableFlowAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public DurableFlowTemplate durableFlowTemplate(DurableFlowEngine durableFlowEngine,
-                                                   DataSource dataSource) {
-        return new DurableFlowTemplate(durableFlowEngine, dataSource);
+                                                   DataSource dataSource,
+                                                   DurableFlowConfig durableFlowConfig) {
+        return new DurableFlowTemplate(durableFlowEngine, dataSource, durableFlowConfig);
     }
 }
