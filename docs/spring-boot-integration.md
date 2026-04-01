@@ -80,34 +80,7 @@ correct strategy automatically:
 | Inside `@Transactional` | Pattern C (safest) | Borrows the transaction connection; registers an `afterCommit` hook that calls `engine.dispatchSteps()` once the transaction commits. Both the business write and the workflow insert are atomic — if the transaction rolls back, neither completes and the workflow is never triggered. |
 | No active transaction | Pattern A (simple) | Engine manages its own connection; commits and dispatches immediately. |
 
-**Example — inside a `@Transactional` method (Pattern C):**
-
-```java
-@Service
-public class OrderService {
-
-    private final OrderRepository orderRepository;
-    private final DurableFlowTemplate durableFlow;
-    private final WorkflowDefinition orderWorkflow;
-
-    // ... constructor injection ...
-
-    @Transactional
-    public String placeOrder(Order order) {
-        orderRepository.save(order);                        // business write
-
-        // afterCommit is registered automatically;
-        // workflow never starts if the transaction rolls back
-        durableFlow.receive(
-            new InboundMessage("order-service", serialize(order), Map.of("orderId", order.getId())),
-            orderWorkflow);
-
-        return order.getId();
-    }
-}
-```
-
-**Example — JMS / Kafka listener (Pattern A, no active transaction):**
+**Example — JMS listener with `@Transactional` (Pattern C — automatic afterCommit):**
 
 ```java
 @Component
@@ -119,8 +92,11 @@ public class OrderMessageListener {
     // ... constructor injection ...
 
     @JmsListener(destination = "${orders.topic}")
+    @Transactional
     public void onMessage(String rawJson) {
-        // No active transaction — engine self-manages connection, commits, and dispatches
+        // Inside @Transactional: DurableFlowTemplate borrows the transaction connection,
+        // inserts atomically, and registers afterCommit automatically.
+        // If the transaction rolls back, the workflow is never triggered.
         durableFlow.receive(
             new InboundMessage("orders", rawJson.getBytes(), Map.of()),
             orderWorkflow);
