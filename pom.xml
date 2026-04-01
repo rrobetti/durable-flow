@@ -15,6 +15,7 @@
 
     <modules>
         <module>durable-flow-core</module>
+        <module>durable-flow-spring-boot-starter</module>
         <module>durable-flow-example</module>
         <module>durable-flow-spring-sample</module>
     </modules>

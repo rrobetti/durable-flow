@@ -27,6 +27,14 @@ spring:
   flyway:
     enabled: false
 
+# Durable Flow engine configuration (all properties are optional – defaults match DurableFlowConfig)
+durable-flow:
+  node-id: ${HOSTNAME:spring-sample-node}
+  lease-timeout-seconds: 30
+  recovery-interval-seconds: 15
+  schema-auto-migrate: true
+  execution-mode: ASYNCHRONOUS
+
 app:
   order:
     # Artemis topic from which order JSON messages are consumed
