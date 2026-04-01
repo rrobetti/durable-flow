@@ -36,10 +36,10 @@
     </dependencyManagement>
 
     <dependencies>
-        <!-- Durable Flow Core -->
+        <!-- Durable Flow Spring Boot Starter (replaces hand-wired durable-flow-core dependency) -->
         <dependency>
             <groupId>io.github.rrobetti</groupId>
-            <artifactId>durable-flow-core</artifactId>
+            <artifactId>durable-flow-spring-boot-starter</artifactId>
             <version>${project.version}</version>
         </dependency>
 
