@@ -31,7 +31,7 @@ class RecoveryIntegrationTest extends BaseIntegrationTest {
             return StepResult.empty();
         });
 
-        ReceiveResult result = engine.receive(message("recovery-src", "recovery-data"), ReceiveOptions.of(wf));
+        ReceiveResult result = engine.receive(message("recovery-src", "recovery-data"), ReceiveOptions.withDeferredExecution(wf));
         assertTrue(executedLatch.await(10, TimeUnit.SECONDS), "Step should execute initially");
         waitFor(500);
 
@@ -59,12 +59,12 @@ class RecoveryIntegrationTest extends BaseIntegrationTest {
             return StepResult.empty();
         });
 
-        engine.receive(message("sched-src", "sched-data"), ReceiveOptions.of(wf));
+        engine.receive(message("sched-src", "sched-data"), ReceiveOptions.withDeferredExecution(wf));
         assertTrue(first.await(10, TimeUnit.SECONDS));
 
         // The engine has leaseTimeout=5s and recoveryInterval=2s (set in BaseIntegrationTest)
         // so recovery should pick up any dangling steps within a few seconds
-        String msgId2 = engine.receive(message("sched-src2", "data2"), ReceiveOptions.of(wf)).messageId();
+        String msgId2 = engine.receive(message("sched-src2", "data2"), ReceiveOptions.withDeferredExecution(wf)).messageId();
         List<StepRecord> steps = new JdbcStepRepository(dataSource, PostgreSqlDialect.INSTANCE)
                 .findStepsForMessage(engine.getMessageStatus(msgId2).get().getMessageId());
         assertFalse(steps.isEmpty());

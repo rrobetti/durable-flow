@@ -63,7 +63,7 @@ public class ParallelWorkflowExample {
                 "{\"eventId\":\"EVT-42\"}".getBytes(StandardCharsets.UTF_8),
                 Map.of());
 
-        ReceiveResult result = engine.receive(message, ReceiveOptions.of(workflow));
+        ReceiveResult result = engine.receive(message, ReceiveOptions.withDeferredExecution(workflow));
         System.out.println("Received: id=" + result.messageId());
 
         boolean completed = latch.await(15, TimeUnit.SECONDS);

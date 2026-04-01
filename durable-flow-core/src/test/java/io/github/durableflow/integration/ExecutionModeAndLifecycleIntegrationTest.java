@@ -36,7 +36,7 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
         try {
             syncEngine.start();
             WorkflowDefinition wf = singleStepWorkflow("sync-wf", ctx -> StepResult.empty());
-            ReceiveResult result = syncEngine.receive(message("sync-src", "sync-payload"), ReceiveOptions.of(wf));
+            ReceiveResult result = syncEngine.receive(message("sync-src", "sync-payload"), ReceiveOptions.withDeferredExecution(wf));
 
             // In synchronous mode the result state must be PROCESSED, not just RECEIVED
             assertEquals(MessageState.PROCESSED, result.messageState(),
@@ -56,7 +56,7 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
         });
 
         // Default mode is ASYNCHRONOUS
-        ReceiveResult result = engine.receive(message("async-src", "async-payload"), ReceiveOptions.of(wf));
+        ReceiveResult result = engine.receive(message("async-src", "async-payload"), ReceiveOptions.withDeferredExecution(wf));
 
         // Return value should be RECEIVED immediately (before async execution finishes)
         assertEquals(MessageState.RECEIVED, result.messageState());
@@ -84,7 +84,7 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
             return StepResult.empty();
         });
 
-        ReceiveResult result = engine.receive(message("async-persist-src", "payload"), ReceiveOptions.of(wf));
+        ReceiveResult result = engine.receive(message("async-persist-src", "payload"), ReceiveOptions.withDeferredExecution(wf));
 
         // receive() must have returned with RECEIVED, meaning the message was persisted
         assertEquals(MessageState.RECEIVED, result.messageState());
@@ -121,7 +121,7 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
                     .build();
 
             ReceiveResult result = syncEngine.receive(
-                    message("sync-multi-src", "data"), ReceiveOptions.of(wf));
+                    message("sync-multi-src", "data"), ReceiveOptions.withDeferredExecution(wf));
 
             assertEquals(MessageState.PROCESSED, result.messageState(),
                     "Multi-step synchronous workflow should complete and return PROCESSED");
@@ -160,7 +160,7 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
                     })
                     .build();
 
-            syncEngine.receive(message("lifecycle-src", "payload"), ReceiveOptions.of(wf));
+            syncEngine.receive(message("lifecycle-src", "payload"), ReceiveOptions.withDeferredExecution(wf));
 
             assertTrue(beforeCalled.get(), "beforeProcessing hook must be called");
             assertTrue(stepCalledWhileBeforeAlreadyRan.get(),
@@ -193,7 +193,7 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
                     })
                     .build();
 
-            syncEngine.receive(message("lifecycle-after-src", "payload"), ReceiveOptions.of(wf));
+            syncEngine.receive(message("lifecycle-after-src", "payload"), ReceiveOptions.withDeferredExecution(wf));
 
             assertTrue(afterCalled.get(), "afterProcessing hook must be called");
             assertEquals(MessageState.PROCESSED, capturedFinalState.get(),
@@ -225,7 +225,7 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
                     })
                     .build();
 
-            syncEngine.receive(message("lifecycle-fail-src", "payload"), ReceiveOptions.of(wf));
+            syncEngine.receive(message("lifecycle-fail-src", "payload"), ReceiveOptions.withDeferredExecution(wf));
 
             assertTrue(afterCalled.get(), "afterProcessing must be called even when a step fails");
             // PARKED because noRetry means step goes FAILED_FINAL → message PARKED
@@ -258,7 +258,7 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
                     .build();
 
             ReceiveResult result = syncEngine.receive(
-                    message("lifecycle-exc-src", "payload"), ReceiveOptions.of(wf));
+                    message("lifecycle-exc-src", "payload"), ReceiveOptions.withDeferredExecution(wf));
 
             assertTrue(stepExecuted.get(), "Steps must run even if beforeProcessing hook throws");
             assertEquals(MessageState.PROCESSED, result.messageState(),
@@ -282,7 +282,7 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
                 })
                 .build();
 
-        engine.receive(message("async-hook-src", "payload"), ReceiveOptions.of(wf));
+        engine.receive(message("async-hook-src", "payload"), ReceiveOptions.withDeferredExecution(wf));
 
         assertTrue(afterLatch.await(10, TimeUnit.SECONDS),
                 "afterProcessing hook must be called during async execution");
@@ -302,7 +302,7 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
             WorkflowDefinition wf = singleStepWorkflow("sync-state-wf", ctx -> StepResult.empty());
 
             ReceiveResult result = syncEngine.receive(
-                    message("sync-state-src", "payload"), ReceiveOptions.of(wf));
+                    message("sync-state-src", "payload"), ReceiveOptions.withDeferredExecution(wf));
 
             // Verify the DB also agrees
             Optional<MessageStatus> status = syncEngine.getMessageStatus(result.messageId());

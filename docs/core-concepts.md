@@ -92,8 +92,8 @@ Any exception thrown by a lifecycle hook is **caught and logged** — it never a
 
 `receive()` always writes the message to the database before returning — **in both modes**. When no external connection is supplied (the default), durable-flow opens its own connection, commits the transaction, and closes the connection before returning. The message is durable the moment `receive()` returns, regardless of what happens next.
 
-> **External connection exception:** When `ReceiveOptions.of(workflow, conn)` or
-> `ReceiveOptions.withDeferredExecution(workflow, conn)` is used, the commit is **not**
+> **External connection exception:** When `ReceiveOptions.withDeferredExecution(workflow, conn)`
+> is used, the commit is **not**
 > performed inside `receive()`. The caller owns the transaction and must commit (or roll
 > back) the connection after `receive()` returns. See [External Connection](#external-connection)
 > below for details.
@@ -112,7 +112,7 @@ DurableFlowEngine asyncEngine = new DurableFlowEngine(dataSource,
         .executionMode(ExecutionMode.ASYNCHRONOUS)  // default; may be omitted
         .build());
 
-ReceiveResult result = asyncEngine.receive(message, ReceiveOptions.of(workflow));
+ReceiveResult result = asyncEngine.receive(message, ReceiveOptions.withDeferredExecution(workflow));
 // result.messageState() == MessageState.RECEIVED
 // The message is already in the DB — safe to ACK the queue/topic message now.
 // Steps execute in the background thread pool.
@@ -123,7 +123,7 @@ DurableFlowEngine syncEngine = new DurableFlowEngine(dataSource,
         .executionMode(ExecutionMode.SYNCHRONOUS)
         .build());
 
-ReceiveResult result = syncEngine.receive(message, ReceiveOptions.of(workflow));
+ReceiveResult result = syncEngine.receive(message, ReceiveOptions.withDeferredExecution(workflow));
 // result.messageState() == PROCESSED | PARKED | IN_PROGRESS | ERROR
 // Returns only after executeEligibleSteps() finishes on the calling thread
 ```
@@ -239,10 +239,7 @@ You can instead pass an existing `java.sql.Connection` to `receive()` so that th
 insertion participates in **your own transaction**:
 
 ```java
-// Option 1 — immediate dispatch (steps dispatched asynchronously after insert)
-ReceiveOptions opts = ReceiveOptions.of(workflow, conn);
-
-// Option 2 — deferred dispatch (caller triggers step execution from afterCommit hook)
+// Deferred dispatch — caller triggers step execution from an afterCommit hook
 ReceiveOptions opts = ReceiveOptions.withDeferredExecution(workflow, conn);
 ```
 
@@ -251,13 +248,9 @@ When a connection is supplied:
   or closing it**. The caller owns the full transaction lifecycle.
 * If the caller's transaction rolls back, both the business writes and the durable-flow
   inserts are rolled back atomically — the workflow is never triggered.
-* Step execution is always dispatched **asynchronously** so that steps never start before
-  the external transaction is visible to other connections.
-
-| Factory method | Dispatch timing | Extra caller work |
-|---|---|---|
-| `ReceiveOptions.of(workflow, conn)` | Immediately after insert (may race before commit; recovery scheduler handles it) | None |
-| `ReceiveOptions.withDeferredExecution(workflow, conn)` | Only when caller calls `engine.dispatchSteps(messageId, workflow)` | Register `afterCommit` callback |
+* Step execution is deferred: the caller must call `engine.dispatchSteps(messageId, workflow)`
+  from an `afterCommit` callback to guarantee that steps start only after the transaction is
+  committed and its rows are visible to other connections.
 
 See the [Spring Boot Integration guide](../docs/spring-boot-integration.md#atomic-receive-with-an-external-connection-preferred)
-for a full Spring `@Transactional` example using both patterns.
+for a full Spring `@Transactional` example.

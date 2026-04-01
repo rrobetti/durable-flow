@@ -37,7 +37,7 @@ class DependencyIntegrationTest extends BaseIntegrationTest {
                 }).dependsOn("enrich")
                 .build();
 
-        ReceiveResult result = engine.receive(message("dag-src", "dag-data"), ReceiveOptions.of(wf));
+        ReceiveResult result = engine.receive(message("dag-src", "dag-data"), ReceiveOptions.withDeferredExecution(wf));
 
         assertTrue(validateLatch.await(10, TimeUnit.SECONDS), "validate should run");
         assertTrue(enrichLatch.await(10, TimeUnit.SECONDS), "enrich should run after validate");
@@ -67,7 +67,7 @@ class DependencyIntegrationTest extends BaseIntegrationTest {
                 })
                 .build();
 
-        engine.receive(message("parallel-src", "parallel-data"), ReceiveOptions.of(wf));
+        engine.receive(message("parallel-src", "parallel-data"), ReceiveOptions.withDeferredExecution(wf));
         assertTrue(latch.await(10, TimeUnit.SECONDS), "Both parallel steps should execute");
     }
 
@@ -86,7 +86,7 @@ class DependencyIntegrationTest extends BaseIntegrationTest {
                 }).dependsOn("upstream")
                 .build();
 
-        engine.receive(message("dep-fail-src", "data"), ReceiveOptions.of(wf));
+        engine.receive(message("dep-fail-src", "data"), ReceiveOptions.withDeferredExecution(wf));
 
         // downstream should NOT execute since upstream failed
         assertFalse(downstreamLatch.await(3, TimeUnit.SECONDS),

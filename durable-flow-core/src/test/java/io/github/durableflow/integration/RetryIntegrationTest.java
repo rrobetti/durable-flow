@@ -29,7 +29,7 @@ class RetryIntegrationTest extends BaseIntegrationTest {
                 }).retryPolicy(policy)
                 .build();
 
-        ReceiveResult result = engine.receive(message("retry-src", "retry-data"), ReceiveOptions.of(wf));
+        ReceiveResult result = engine.receive(message("retry-src", "retry-data"), ReceiveOptions.withDeferredExecution(wf));
 
         assertTrue(latch.await(20, TimeUnit.SECONDS), "Step should eventually succeed after retries");
         waitFor(500);
@@ -53,7 +53,7 @@ class RetryIntegrationTest extends BaseIntegrationTest {
                 }).retryPolicy(policy)
                 .build();
 
-        ReceiveResult result = engine.receive(message("park-src", "park-data"), ReceiveOptions.of(wf));
+        ReceiveResult result = engine.receive(message("park-src", "park-data"), ReceiveOptions.withDeferredExecution(wf));
         assertTrue(failureLatch.await(30, TimeUnit.SECONDS), "Should exhaust all attempts");
         waitFor(1000);
 
@@ -72,7 +72,7 @@ class RetryIntegrationTest extends BaseIntegrationTest {
                 }).retryPolicy(RetryPolicy.noRetry())
                 .build();
 
-        ReceiveResult result = engine.receive(message("no-retry-src", "data"), ReceiveOptions.of(wf));
+        ReceiveResult result = engine.receive(message("no-retry-src", "data"), ReceiveOptions.withDeferredExecution(wf));
         assertTrue(latch.await(10, TimeUnit.SECONDS));
         waitFor(500);
 

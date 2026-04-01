@@ -31,27 +31,14 @@ public record ReceiveOptions(
         Objects.requireNonNull(workflow, "workflow must not be null");
     }
 
-    /** Convenience constructor using only a workflow definition. */
-    public static ReceiveOptions of(WorkflowDefinition workflow) {
-        return new ReceiveOptions(workflow, null, null, false);
-    }
-
     /**
-     * Creates options using a workflow definition and an external JDBC connection.
+     * Creates options using only a workflow definition, with no external connection.
      *
-     * <p>When a connection is supplied durable-flow uses it for all persistence operations
-     * inside {@code receive()} without committing or closing it. This allows the message
-     * insertion and the caller's own business logic to share a single database transaction.
-     * The caller must commit (or roll back) the connection after {@code receive()} returns.
-     *
-     * <p>Step execution is dispatched asynchronously immediately after the insert.  Because the
-     * external transaction has not yet committed, there is a small race window where the worker
-     * may find no visible rows yet and exit cleanly; the recovery scheduler then picks up the
-     * committed steps.  Use {@link #withDeferredExecution(WorkflowDefinition, Connection)} if you
-     * need to guarantee that steps are dispatched only after the transaction commits.
+     * <p>The engine manages the database connection internally: the message and its steps are
+     * written to the database and the transaction is committed before this method returns.
      */
-    public static ReceiveOptions of(WorkflowDefinition workflow, Connection connection) {
-        return new ReceiveOptions(workflow, null, connection, false);
+    public static ReceiveOptions withDeferredExecution(WorkflowDefinition workflow) {
+        return new ReceiveOptions(workflow, null, null, false);
     }
 
     /**

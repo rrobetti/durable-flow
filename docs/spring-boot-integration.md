@@ -165,8 +165,8 @@ Key implications:
   `PlatformTransactionManager`-managed transaction.
 * Every durable-flow operation except `receive()` always uses its **own dedicated connection** with
   its own transaction scope, regardless of any active Spring transaction on the calling thread.
-* **Exception — `receive()` with an external connection:** when `ReceiveOptions.of(workflow, conn)`
-  or `ReceiveOptions.withDeferredExecution(workflow, conn)` is used, `receive()` uses the
+* **Exception — `receive()` with an external connection:** when `ReceiveOptions.withDeferredExecution(workflow, conn)`
+  is used, `receive()` uses the
   caller-supplied connection for the message and step inserts **without committing or closing it**.
   The caller owns the transaction lifecycle. See
   [Atomic receive() with an external connection (preferred)](#atomic-receive-with-an-external-connection-preferred)
@@ -266,7 +266,7 @@ app:
 
 The recommended way to guarantee atomicity between your business logic and durable-flow's
 message insertion is to pass Spring's current transaction connection directly to `receive()`
-via `ReceiveOptions.of(workflow, connection)`.
+via `ReceiveOptions.withDeferredExecution(workflow, connection)`.
 
 When a connection is supplied, durable-flow uses it for the message and step insertions
 performed inside `receive()` **without committing or closing it**. Spring commits the
@@ -305,7 +305,7 @@ public class OrderService {
         // durable-flow inserts the message using this connection without committing it
         ReceiveResult result = engine.receive(
             new InboundMessage("order-service", serialize(order), Map.of()),
-            ReceiveOptions.of(orderWorkflow, conn));
+            ReceiveOptions.withDeferredExecution(orderWorkflow, conn));
 
         // Spring commits conn when this method returns — both the business save and
         // the durable-flow insert are committed atomically.
@@ -337,15 +337,10 @@ are rolled back atomically — the workflow is never triggered.
 
 ### Guaranteed post-commit dispatch with withDeferredExecution
 
-`ReceiveOptions.of(workflow, conn)` submits step dispatch immediately after the insert.
-Because the external transaction has not yet committed there is a small race window where
-the background worker finds no visible rows yet and exits cleanly — the recovery scheduler
-then picks the steps up.
-
-For Spring Boot applications, use `ReceiveOptions.withDeferredExecution(workflow, conn)` to
-guarantee that steps are dispatched only after the external transaction is committed and its
-rows are visible to other connections. This skips the immediate dispatch entirely; you trigger
-it yourself from an `afterCommit()` callback using `engine.dispatchSteps(messageId, workflow)`.
+`ReceiveOptions.withDeferredExecution(workflow, conn)` defers step dispatch entirely — no
+background worker is submitted inside `receive()`. You trigger it yourself from an `afterCommit()`
+callback using `engine.dispatchSteps(messageId, workflow)`, guaranteeing that steps only start
+after the external transaction is committed and its rows are visible to other connections.
 
 ```java
 import io.github.durableflow.DurableFlowEngine;
@@ -404,14 +399,6 @@ With this pattern:
 * If the transaction commits, `afterCommit()` is called and `dispatchSteps()` submits
   step execution to the background thread pool — steps always start after rows are visible.
 * If the transaction rolls back, `afterCommit()` is **never called** — no steps ever run.
-
-> **Comparison with `ReceiveOptions.of(workflow, conn)`:**
-> | | `of(workflow, conn)` | `withDeferredExecution(workflow, conn)` |
-> |---|---|---|
-> | Step dispatch timing | Immediately after insert (may race before commit) | Only after caller calls `dispatchSteps()` |
-> | Race-window risk | Yes — harmless (READ_COMMITTED); recovery scheduler handles it | None |
-> | Extra caller code | None | `afterCommit` registration + `dispatchSteps()` call |
-> | Recommended when | Simplest case; recovery interval delay is acceptable | You need guaranteed immediate dispatch after commit |
 
 ---
 
@@ -554,7 +541,7 @@ public class OrderWorkflowService {
     public ReceiveResult submitOrder(Order order) {
         InboundMessage msg = new InboundMessage(
             "order-service", serialize(order), Map.of("correlationId", order.getId()));
-        return engine.receive(msg, ReceiveOptions.of(workflow));
+        return engine.receive(msg, ReceiveOptions.withDeferredExecution(workflow));
     }
 }
 ```
@@ -791,7 +778,7 @@ public class OrderWorkflowService {
                 "order-service",
                 serialize(order),
                 Map.of("orderId", order.getId())),
-            ReceiveOptions.of(workflow, conn));
+            ReceiveOptions.withDeferredExecution(workflow, conn));
 
         // Spring commits conn when this method returns successfully.
         // Steps run asynchronously after the transaction is committed.
@@ -913,7 +900,7 @@ public DurableFlowConfig durableFlowConfig(DurableFlowProperties props) {
 | Scenario | Behaviour | Recommendation |
 |----------|-----------|---------------|
 | `receive()` called outside any Spring transaction | durable-flow commits its own independent transaction | ✅ Safe — simplest approach |
-| `receive()` called with an external connection (`ReceiveOptions.of(wf, conn)`) | durable-flow uses the caller's connection without committing it; both writes are atomic | ✅ **Preferred** — single atomic transaction with your business logic |
+| `receive()` called with an external connection (`ReceiveOptions.withDeferredExecution(wf, conn)`) | durable-flow uses the caller's connection without committing it; both writes are atomic | ✅ **Preferred** — single atomic transaction with your business logic |
 | Business transaction rolls back | Both business writes and workflow insertion are rolled back atomically | ✅ Clean — workflow is never triggered |
 | `SYNCHRONOUS` mode inside `@Transactional` | Calling thread blocks; steps open connections from pool | ⚠️ Size pool to at least `immediateExecutionThreads + 1`; prefer `ASYNCHRONOUS` |
 | Separate DataSource for durable-flow | Complete transaction isolation; no cross-DataSource atomicity | ✅ Cleanest isolation; cross-database atomicity requires XA (rarely needed) |

@@ -37,7 +37,7 @@ import java.util.concurrent.*;
  *
  * ReceiveResult result = engine.receive(
  *     new InboundMessage("my-source", payload, headers),
- *     ReceiveOptions.of(wf));
+ *     ReceiveOptions.withDeferredExecution(wf));
  *
  * engine.close();
  * }</pre>
@@ -128,7 +128,7 @@ public class DurableFlowEngine implements Closeable {
      *     Connection conn = DataSourceUtils.getConnection(dataSource);
      *     ReceiveResult result = engine.receive(
      *         new InboundMessage("my-source", rawMessage.getBytes(), Map.of()),
-     *         ReceiveOptions.of(workflow, conn));
+     *         ReceiveOptions.withDeferredExecution(workflow, conn));
      *     // Spring commits conn together with the rest of the transaction
      * }
      * }</pre>
@@ -141,7 +141,7 @@ public class DurableFlowEngine implements Closeable {
      * <pre>{@code
      * // The message is written to the DB and the transaction committed synchronously.
      * // receive() then returns immediately — safe to ACK the queue message right here.
-     * ReceiveResult result = engine.receive(message, ReceiveOptions.of(workflow));
+     * ReceiveResult result = engine.receive(message, ReceiveOptions.withDeferredExecution(workflow));
      * // result.messageState() == MessageState.RECEIVED
      * queue.acknowledge(message);  // safe: message is already durable in the DB
      * // Steps run in the background thread pool concurrently
@@ -151,7 +151,7 @@ public class DurableFlowEngine implements Closeable {
      * <pre>{@code
      * // The message is written to the DB and then steps execute on this thread.
      * // receive() blocks until all currently-executable steps have finished.
-     * ReceiveResult result = engine.receive(message, ReceiveOptions.of(workflow));
+     * ReceiveResult result = engine.receive(message, ReceiveOptions.withDeferredExecution(workflow));
      * // result.messageState() == PROCESSED | PARKED | IN_PROGRESS | ERROR
      * }</pre>
      */
