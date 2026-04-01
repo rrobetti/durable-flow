@@ -57,12 +57,12 @@ durable-flow:
 
 The starter auto-configures:
 
-| Bean | Type | Purpose |
-|------|------|---------|
-| `DurableFlowConfig` | `DurableFlowConfig` | Engine configuration from `durable-flow.*` properties |
-| `DurableFlowEngine` | `DurableFlowEngine` | Core engine (not started until lifecycle fires) |
-| `DurableFlowLifecycle` | `SmartLifecycle` | Starts engine before message consumers; stops it after they shut down |
-| `DurableFlowTemplate` | `DurableFlowTemplate` | Transparent transaction integration for `receive()` calls |
+| Bean name | Type | Purpose |
+|-----------|------|---------|
+| `durableFlowConfig` | `DurableFlowConfig` | Engine configuration from `durable-flow.*` properties |
+| `durableFlowEngine` | `DurableFlowEngine` | Core engine (not started until lifecycle fires) |
+| `durableFlowLifecycle` | `DurableFlowLifecycle` | Starts engine before message consumers; stops it after they shut down |
+| `durableFlowTemplate` | `DurableFlowTemplate` | Transparent transaction integration for `receive()` calls |
 
 > **MetricsListener auto-wiring:** if a `MetricsListener` bean is present in the context
 > (e.g. a Micrometer adapter) it is automatically passed to the engine constructor.
