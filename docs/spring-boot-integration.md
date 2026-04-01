@@ -1,37 +1,33 @@
 # Integrating durable-flow with Spring Boot
 
-This guide explains how to embed `durable-flow` inside a Spring Boot application.
-The recommended path is the **Spring Boot Starter** which eliminates all infrastructure
-boilerplate and provides `DurableFlowTemplate` — a single method call that automatically
-handles transaction integration, including the `afterCommit` dispatch hook.
+This guide explains how to embed `durable-flow` inside a Spring Boot application using the
+**Spring Boot Starter** — the recommended and simplest path. The starter provides
+`DurableFlowTemplate`, which handles all transaction integration automatically so application
+code never has to manage JDBC connections, `afterCommit` hooks, or engine lifecycle.
 
 ---
 
 ## Table of Contents
 
-1. [Using the Spring Boot Starter (recommended)](#using-the-spring-boot-starter-recommended)
-   - [Quick Start](#quick-start)
-   - [DurableFlowTemplate — automatic transaction integration](#durableflowtemplate--automatic-transaction-integration)
-   - [Overriding individual auto-configured beans](#overriding-individual-auto-configured-beans)
-2. [Manual wiring (without the starter)](#manual-wiring-without-the-starter)
-3. [Transaction Isolation](#transaction-isolation)
-   - [How durable-flow manages transactions](#how-durable-flow-manages-transactions)
-   - [Option A – Shared DataSource (simple, no atomicity guarantee)](#option-a--shared-datasource-simple-no-atomicity-guarantee)
-   - [Option B – Separate DataSource](#option-b--separate-datasource)
-   - [Atomic receive() with an external connection (preferred)](#atomic-receive-with-an-external-connection-preferred)
-   - [Guaranteed post-commit dispatch with withDeferredExecution](#guaranteed-post-commit-dispatch-with-withdeferredexecution)
-4. [Flyway Co-existence](#flyway-co-existence)
-5. [Execution Mode Selection](#execution-mode-selection)
-6. [Using Spring Beans inside Step Handlers](#using-spring-beans-inside-step-handlers)
-7. [Observability: Wiring the MetricsListener SPI](#observability-wiring-the-metricslistener-spi)
-8. [Full Worked Example](#full-worked-example)
-9. [Configuration Properties Reference](#configuration-properties-reference)
+1. [Quick Start](#quick-start)
+2. [Defining a Workflow](#defining-a-workflow)
+3. [Submitting Messages with DurableFlowTemplate](#submitting-messages-with-durableflowtemplate)
+   - [Inside a @Transactional listener or controller](#inside-a-transactional-listener-or-controller)
+   - [Transaction safety guarantees](#transaction-safety-guarantees)
+   - [Duplicate messages](#duplicate-messages)
+4. [Overriding individual auto-configured beans](#overriding-individual-auto-configured-beans)
+5. [Manual wiring (without the starter)](#manual-wiring-without-the-starter)
+6. [Database Connectivity](#database-connectivity)
+7. [Flyway Co-existence](#flyway-co-existence)
+8. [Execution Mode Selection](#execution-mode-selection)
+9. [Using Spring Beans inside Step Handlers](#using-spring-beans-inside-step-handlers)
+10. [Observability: Wiring the MetricsListener SPI](#observability-wiring-the-metricslistener-spi)
+11. [Full Worked Example](#full-worked-example)
+12. [Configuration Properties Reference](#configuration-properties-reference)
 
 ---
 
-## Using the Spring Boot Starter (recommended)
-
-### Quick Start
+## Quick Start
 
 Add a single dependency:
 
@@ -69,20 +65,84 @@ The starter auto-configures:
 
 ---
 
-### DurableFlowTemplate — automatic transaction integration
+## Defining a Workflow
 
-`DurableFlowTemplate` is the primary API for submitting messages to the engine from
-application code. It inspects the current thread's transaction state and selects the
-correct strategy automatically:
-
-| Calling context | Strategy | What happens |
-|-----------------|----------|-------------|
-| Inside `@Transactional` | Pattern C (safest) | Borrows the transaction connection; registers an `afterCommit` hook that calls `engine.dispatchSteps()` once the transaction commits. Both the business write and the workflow insert are atomic — if the transaction rolls back, neither completes and the workflow is never triggered. |
-| No active transaction | Pattern A (simple) | Engine manages its own connection; commits and dispatches immediately. |
-
-**Example — JMS listener with `@Transactional` (Pattern C — automatic afterCommit):**
+A `WorkflowDefinition` describes the steps that process a message. Define it as a Spring `@Bean`
+inside a `@Configuration` class. Inject any Spring-managed dependencies (repositories, clients,
+services) into the class and close over them in the step lambdas:
 
 ```java
+// OrderWorkflow.java
+@Configuration
+public class OrderWorkflow {
+
+    private final InventoryClient inventoryClient;
+    private final NotificationService notificationService;
+
+    public OrderWorkflow(InventoryClient inventoryClient,
+                         NotificationService notificationService) {
+        this.inventoryClient     = inventoryClient;
+        this.notificationService = notificationService;
+    }
+
+    @Bean
+    public WorkflowDefinition orderWorkflowDefinition() {
+        return WorkflowDefinition.builder("order-processing")
+            .beforeProcessing(ctx ->
+                log.info("Starting order workflow for message {}", ctx.getMessageId()))
+            .step("validate", ctx -> {
+                Order order = deserialize(ctx.getPayload());
+                if (order.getAmount().signum() <= 0)
+                    throw new IllegalArgumentException("Order amount must be positive");
+                return StepResult.of(ctx.getPayload());
+            })
+            .step("reserve-inventory", ctx -> {
+                Order order = deserialize(ctx.getPreviousStepOutputs().get("validate"));
+                inventoryClient.reserve(order);
+                return StepResult.of(ctx.getPayload());
+            }).dependsOn("validate")
+              .retryPolicy(RetryPolicy.exponentialBackoff(
+                  5, Duration.ofSeconds(2), 2.0, Duration.ofMinutes(5), true))
+            .step("notify-customer", ctx -> {
+                notificationService.sendConfirmation(deserialize(ctx.getPayload()));
+                return StepResult.empty();
+            }).dependsOn("reserve-inventory")
+              .retryPolicy(RetryPolicy.fixedDelay(3, Duration.ofSeconds(5)))
+            .afterProcessing(ctx ->
+                log.info("Order workflow {} ended: state={}", ctx.getMessageId(), ctx.getFinalState()))
+            .build();
+    }
+}
+```
+
+Multiple workflow definitions can coexist — declare one `@Bean` per workflow. The
+workflow definition bean is then injected into whichever listener or controller triggers it.
+
+---
+
+## Submitting Messages with DurableFlowTemplate
+
+`DurableFlowTemplate` is the primary API for submitting messages to the engine. Inject it
+directly into a `@JmsListener` component or `@RestController` and call `receive()`:
+
+```java
+@Autowired
+private DurableFlowTemplate durableFlow;
+```
+
+### Inside a @Transactional listener or controller
+
+Annotate the handler method with `@Transactional` and call `durableFlow.receive()`. The
+template automatically:
+
+1. Detects the active transaction on the current thread.
+2. Borrows the connection already bound to that transaction so the durable-flow insert is
+   part of the same database transaction as any other writes in the method.
+3. Registers an `afterCommit` callback that calls `engine.dispatchSteps()` only after the
+   transaction commits successfully.
+
+```java
+// JMS listener
 @Component
 public class OrderMessageListener {
 
@@ -94,21 +154,61 @@ public class OrderMessageListener {
     @JmsListener(destination = "${orders.topic}")
     @Transactional
     public void onMessage(String rawJson) {
-        // Inside @Transactional: DurableFlowTemplate borrows the transaction connection,
-        // inserts atomically, and registers afterCommit automatically.
-        // If the transaction rolls back, the workflow is never triggered.
         durableFlow.receive("orders", rawJson, Map.of(), orderWorkflow);
     }
 }
 ```
 
-For the rare Pattern B case (immediate step dispatch inside a transaction, before commit),
-call `DurableFlowEngine#receive` directly with
-`ReceiveOptions.of(workflow, conn)`.
+```java
+// REST controller
+@RestController
+@RequestMapping("/orders")
+public class OrderController {
+
+    private final OrderRepository orderRepository;
+    private final DurableFlowTemplate durableFlow;
+    private final WorkflowDefinition orderWorkflowDefinition;
+
+    // ... constructor injection ...
+
+    @PostMapping
+    @Transactional
+    public ResponseEntity<String> placeOrder(@RequestBody Order order) {
+        orderRepository.save(order);
+        ReceiveResult result = durableFlow.receive(
+            "order-service", serialize(order),
+            Map.of("orderId", order.getId()),
+            orderWorkflowDefinition);
+        return ResponseEntity.accepted().body(result.messageId());
+    }
+}
+```
+
+When called outside any `@Transactional` context the template falls back to having the engine
+manage its own connection — the message is persisted and steps are dispatched immediately after
+the engine's internal transaction commits.
+
+### Transaction safety guarantees
+
+| Calling context | What the template does |
+|-----------------|------------------------|
+| Inside `@Transactional` | Borrows the transaction connection; inserts atomically with any other writes; registers `afterCommit` to dispatch steps only after the transaction commits. If the transaction rolls back, neither the insert nor the dispatch ever happens. |
+| Outside any transaction | Engine manages its own connection; commits the insert and dispatches steps immediately. |
+
+The `receive(String source, String textPayload, Map<String, String> headers, WorkflowDefinition workflow)`
+overload accepts a plain `String` payload and encodes it to UTF-8 internally — JMS listeners
+receiving text messages do not need to call `.getBytes()`.
+
+### Duplicate messages
+
+When a duplicate is detected, `receive()` returns a `ReceiveResult` with `duplicate() == true`
+**without rolling back the connection**. The connection lifecycle remains under Spring's control —
+the transaction commits normally (with no new insert, which is harmless). Use `result.duplicate()`
+to branch your own logic if needed.
 
 ---
 
-### Overriding individual auto-configured beans
+## Overriding individual auto-configured beans
 
 Every bean produced by the starter is annotated `@ConditionalOnMissingBean`. Declare a bean
 of the same type in any `@Configuration` class to replace it:
@@ -171,14 +271,6 @@ If you only want `durable-flow-core` without the starter, create a `@Configurati
 ```
 
 ```java
-import io.github.durableflow.DurableFlowConfig;
-import io.github.durableflow.DurableFlowEngine;
-import io.github.durableflow.api.ExecutionMode;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-import javax.sql.DataSource;
-
 @Configuration
 public class DurableFlowEngineConfig {
 
@@ -199,9 +291,7 @@ public class DurableFlowEngineConfig {
 }
 ```
 
-> **Kubernetes / Cloud tip:** Set `nodeId` to the pod name via an environment variable
-> so each replica has a unique identifier in the `owner` column:
->
+> **Kubernetes / Cloud tip:** Set `nodeId` to the pod name via an environment variable:
 > ```java
 > .nodeId(System.getenv().getOrDefault("HOSTNAME", UUID.randomUUID().toString()))
 > ```
@@ -209,10 +299,6 @@ public class DurableFlowEngineConfig {
 If you need tighter control over startup ordering, implement `SmartLifecycle`:
 
 ```java
-import io.github.durableflow.DurableFlowEngine;
-import org.springframework.context.SmartLifecycle;
-import org.springframework.stereotype.Component;
-
 @Component
 public class DurableFlowLifecycle implements SmartLifecycle {
 
@@ -231,191 +317,9 @@ public class DurableFlowLifecycle implements SmartLifecycle {
 }
 ```
 
----
-
-## Transaction Isolation
-
-This is the most important topic when combining durable-flow with Spring Boot.
-
-### How durable-flow manages transactions
-
-By default, durable-flow **manages all database access through its own JDBC connections**. Every
-operation that requires atomicity follows this pattern internally:
-
-```java
-try (Connection conn = dataSource.getConnection()) {
-    conn.setAutoCommit(false);
-    try {
-        // ... perform DB operations ...
-        conn.commit();
-    } catch (Exception e) {
-        conn.rollback();
-        throw e;
-    }
-}
-```
-
-Key implications:
-
-* By default, durable-flow calls `dataSource.getConnection()` **directly** — it does **not** use
-  Spring's `DataSourceUtils.getConnection()` and does **not** participate in any
-  `PlatformTransactionManager`-managed transaction.
-* Every durable-flow operation except `receive()` always uses its **own dedicated connection** with
-  its own transaction scope, regardless of any active Spring transaction on the calling thread.
-* **Exception — `receive()` with an external connection:** when `ReceiveOptions.withDeferredExecution(workflow, conn)`
-  is used, `receive()` uses the caller-supplied connection for the message and step inserts
-  **without committing or closing it**. The caller owns the transaction lifecycle. See
-  [Atomic receive() with an external connection (preferred)](#atomic-receive-with-an-external-connection-preferred)
-  for details.
-* The following discrete transactions exist inside the engine:
-
-| Engine operation | Connection used | Atomic unit |
-|-----------------|-----------------|-------------|
-| `receive()` (default) | Engine-internal | Insert `messages` + insert `message_steps` + insert `message_step_dependencies` |
-| `receive()` (external connection) | Caller-provided | Same inserts — caller commits/rolls back |
-| `claimStep()` | Engine-internal | Atomic `UPDATE message_steps WHERE step_state IN ('PENDING','FAILED_RETRYABLE')` |
-| Step success | Engine-internal | `UPDATE message_steps SET step_state = 'SUCCEEDED'` + store output |
-| Step failure | Engine-internal | `UPDATE message_steps SET step_state = 'FAILED_*'` + record error |
-| State recalculation | Engine-internal | `UPDATE messages SET message_state = ...` |
-| `redrive()` | Engine-internal | Reset `FAILED_FINAL` steps + set message to `IN_PROGRESS` |
-
----
-
-### Option A – Shared DataSource (simple, no atomicity guarantee)
-
-Use the same `DataSource` for both your application code (via Spring's
-`PlatformTransactionManager`) and the `DurableFlowEngine`. Because durable-flow
-opens its own connections by default, the two subsystems operate on **independent
-connection-level transactions** even when sharing the pool.
-
-```
-Spring @Transactional method                durable-flow engine
-------------------------------------        ------------------------------------
-pool.getConnection() -> conn-A              pool.getConnection() -> conn-B
-  BEGIN (Spring JDBC / JPA)                   BEGIN (engine-internal)
-  INSERT INTO orders ...                       INSERT INTO messages ...
-  INSERT INTO order_items ...                  INSERT INTO message_steps ...
-  COMMIT (Spring)                              COMMIT (engine)
-conn-A -> returned to pool                  conn-B -> returned to pool
-```
-
-**Pros:**
-* No extra DataSource configuration.
-* Spring Boot auto-configuration works out of the box.
-* The pool is shared, so total connections are kept bounded.
-
-**Cons:**
-* Business data and workflow state commit in **separate transactions** — see
-  [Atomic receive() with an external connection (preferred)](#atomic-receive-with-an-external-connection-preferred)
-  for the recommended way to eliminate this race.
-
----
-
-### Option B – Separate DataSource
-
-Create a dedicated `DataSource` (pointing to the same or a different schema/database)
-exclusively for durable-flow. Using the starter, override the engine bean:
-
-```java
-@Configuration
-public class DurableFlowConfig {
-
-    @Bean
-    @ConfigurationProperties("app.durable-flow.datasource")
-    public DataSource durableFlowDataSource() {
-        return DataSourceBuilder.create().build();
-    }
-
-    @Bean(destroyMethod = "close")
-    public DurableFlowEngine durableFlowEngine(
-            @Qualifier("durableFlowDataSource") DataSource durableFlowDataSource,
-            DurableFlowConfig durableFlowConfig) {
-        // lifecycle bean still handles start/close
-        return new DurableFlowEngine(durableFlowDataSource, durableFlowConfig);
-    }
-}
-```
-
-```yaml
-# application.yml
-app:
-  durable-flow:
-    datasource:
-      url: jdbc:postgresql://localhost:5432/durable_flow_db
-      username: df_user
-      password: df_pass
-      hikari:
-        maximum-pool-size: 5
-        auto-commit: false
-```
-
-**Pros:**
-* Complete isolation — no connection pool contention.
-* Allows independent scaling or tuning of the workflow database.
-* Business schema and workflow schema evolve independently.
-
-**Cons:**
-* Requires maintaining a second DataSource / connection pool.
-* True cross-database atomicity still requires an XA transaction manager (usually
-  unnecessary given durable-flow's deduplication guarantees).
-
----
-
-### Atomic receive() with an external connection (preferred)
-
-The recommended way to guarantee atomicity between your business logic and durable-flow's
-message insertion is to use `DurableFlowTemplate` (starter) or manually pass Spring's
-current transaction connection to `receive()` via
-`ReceiveOptions.withDeferredExecution(workflow, connection)`.
-
-When a connection is supplied, durable-flow uses it for the message and step insertions
-performed inside `receive()` **without committing or closing it**. Spring commits the
-connection when the `@Transactional` method returns, making both writes atomic in a single
-database transaction.
-
-**With `DurableFlowTemplate` (starter — zero boilerplate):**
-
-```java
-@PostMapping
-@Transactional
-public ResponseEntity<String> placeOrder(@RequestBody Order order) {
-    orderRepository.save(order);
-    ReceiveResult result = durableFlow.receive("order-service", serialize(order), Map.of(), orderWorkflow);
-    // afterCommit registered automatically; steps dispatched after TX commits
-    return ResponseEntity.accepted().body(result.messageId());
-}
-```
-
-**Without the starter (manual Pattern B — immediate dispatch):**
-
-```java
-@JmsListener(destination = "orders")
-@Transactional
-public void onMessage(String rawMessage) {
-    Connection conn = DataSourceUtils.getConnection(dataSource);
-    engine.receive("orders", rawMessage, Map.of(),
-        ReceiveOptions.of(orderWorkflow, conn));
-    // Steps dispatched immediately; Spring commits conn when this method returns
-}
-```
-
-**Duplicate messages with an external connection:**
-When a duplicate is detected, durable-flow returns a `ReceiveResult` with `duplicate() == true`
-**without rolling back the connection**. The connection lifecycle remains entirely under
-Spring's control — Spring will commit the transaction as normal (with no new insert, which
-is harmless). Use `result.duplicate()` to branch your own logic if needed.
-
----
-
-### Guaranteed post-commit dispatch with withDeferredExecution
-
-`ReceiveOptions.withDeferredExecution(workflow, conn)` defers step dispatch entirely — no
-background worker is submitted inside `receive()`. The caller triggers it from an
-`afterCommit()` callback, guaranteeing that steps only start after the external transaction
-is committed and its rows are visible to other connections.
-
-**With `DurableFlowTemplate` this is done automatically.** Below is the equivalent manual
-pattern for reference:
+When calling the engine directly (without `DurableFlowTemplate`), you are responsible for
+transaction integration. The recommended pattern is to pass Spring's current transaction
+connection to `receive()` and register an `afterCommit` hook:
 
 ```java
 @JmsListener(destination = "orders")
@@ -436,11 +340,29 @@ public void onMessage(String rawMessage) {
 }
 ```
 
-With this pattern:
-* `receive()` persists the message rows using the caller's connection (no commit).
-* If the transaction commits, `afterCommit()` is called and `dispatchSteps()` submits
-  step execution to the background thread pool — steps always start after rows are visible.
-* If the transaction rolls back, `afterCommit()` is **never called** — no steps ever run.
+`DurableFlowTemplate` automates exactly this pattern — prefer it when using the starter.
+
+---
+
+## Database Connectivity
+
+By default, durable-flow shares the application's primary `DataSource`. Both your application
+code (via Spring's transaction manager) and the engine draw from the same pool, but they use
+**independent connections and transactions**. This is sufficient for most use cases — the engine's
+deduplication guarantees prevent duplicate workflow instances even if the application transaction
+rolls back after the engine has already committed.
+
+When you need strict atomicity between a business write and the workflow insertion (e.g. an order
+must only be processed once and only if it was persisted), use `DurableFlowTemplate` inside a
+`@Transactional` method. The template borrows the transaction connection so both writes commit
+together.
+
+**Separate DataSource:** if you want full isolation between the application schema and the
+workflow schema, override the `durableFlowEngine` bean to supply a dedicated `DataSource`
+(see [Overriding individual auto-configured beans](#overriding-individual-auto-configured-beans)).
+This eliminates connection pool contention and allows independent schema evolution, at the cost
+of maintaining a second connection pool. True cross-database atomicity is rarely needed — the
+engine's deduplication handles the edge cases.
 
 ---
 
@@ -486,8 +408,8 @@ If you want a single Flyway run for your whole schema:
 ### Approach 3 — Separate schema
 
 Use a dedicated schema (PostgreSQL) or a separate database (any vendor) for durable-flow
-tables and point a dedicated `DataSource` (Option B above) at it. This is the cleanest
-approach when you want strict separation.
+tables and point a dedicated `DataSource` at it. This is the cleanest approach when you
+want strict separation.
 
 ---
 
@@ -811,16 +733,3 @@ All `durable-flow.*` properties are optional. Defaults match `DurableFlowConfig`
 | `durable-flow.recovery-interval-seconds` | `int` | `30` | Interval between recovery scheduler sweeps. |
 | `durable-flow.schema-auto-migrate` | `boolean` | `true` | Whether the engine runs Flyway to create/update its schema on startup. |
 | `durable-flow.execution-mode` | `ExecutionMode` | `ASYNCHRONOUS` | `ASYNCHRONOUS` returns immediately; `SYNCHRONOUS` blocks until steps complete. |
-
----
-
-## Summary: Transaction Isolation Quick-Reference
-
-| Scenario | Behaviour | Recommendation |
-|----------|-----------|---------------|
-| `durableFlow.receive()` called inside `@Transactional` | Joins the transaction; `afterCommit` hook registered automatically | ✅ **Recommended** — use `DurableFlowTemplate` |
-| `durableFlow.receive()` called outside any transaction | Engine commits its own independent transaction | ✅ Safe — simplest approach |
-| Business transaction rolls back | Both business writes and workflow insertion are rolled back atomically | ✅ Clean — workflow is never triggered |
-| `receive()` with external connection (manual) | durable-flow uses caller's connection without committing it | ✅ Safe — same as starter pattern C |
-| `SYNCHRONOUS` mode inside `@Transactional` | Calling thread blocks; steps open connections from pool | ⚠️ Size pool appropriately; prefer `ASYNCHRONOUS` |
-| Separate DataSource for durable-flow | Complete transaction isolation; no cross-DataSource atomicity | ✅ Cleanest isolation; XA rarely needed |
