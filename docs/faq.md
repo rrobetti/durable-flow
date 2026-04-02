@@ -15,6 +15,8 @@ The `RecoveryScheduler` handles this automatically through **lease-based recover
 
 In the worst case the step is retried after at most `leaseTimeoutSeconds + recoveryIntervalSeconds` (≈ 90 s with defaults). No manual intervention is needed.
 
+📊 See the [Node Failure Recovery flow diagram](node-failure-recovery.md) for a step-by-step visual of this process, including how context is stored and restored.
+
 To tune the recovery window adjust these two settings:
 
 ```java
@@ -39,6 +41,8 @@ No in-memory state is involved in recovery. Before executing any step — includ
 
 The retried step itself had not yet written its own result (it never completed successfully), so only the outputs of its upstream dependencies matter — and those were already persisted when those steps succeeded. The reconstructed `StepContext` therefore contains the same `payload` and `previousStepOutputs` map that the original execution would have seen.
 
+📊 See the [Node Failure Recovery flow diagram](node-failure-recovery.md) for a detailed visual of how context flows through the database and is restored on a new node.
+
 ---
 
 ## Is the step lease renewed on each retry, or does a single lease span all attempts?
@@ -58,6 +62,8 @@ WHERE id = ?
 ```
 
 When a step fails (or crashes and its lease expires), `locked_until` and `owner` are both reset to `NULL` as part of the `FAILED_RETRYABLE` transition. The next attempt therefore starts clean with a full, fresh lease window — there is no shared or cumulative lease across attempts.
+
+📊 See the [Node Failure Recovery flow diagram](node-failure-recovery.md) for a visual showing how the lease transitions across nodes.
 
 ---
 
@@ -98,3 +104,5 @@ DurableFlowConfig config = DurableFlowConfig.builder()
 ```
 
 See [Configuration Reference](configuration.md) for all available options.
+
+📊 See the [Step Retry flow diagram](retry-flow.md) for a visual of the full retry lifecycle.
