@@ -25,3 +25,43 @@ DurableFlowConfig config = DurableFlowConfig.builder()
 ```
 
 See [Configuration Reference](configuration.md) for all available options.
+
+---
+
+## If a step fails in normal conditions, is it retried immediately or after a configurable delay?
+
+After a configurable delay. When a step throws an exception the engine:
+
+1. Consults the step's `RetryPolicy` to decide whether another attempt is allowed.
+2. Computes `nextRetryAt = now + policy.nextDelay(attempt)` and persists it on the step record.
+3. Marks the step **`FAILED_RETRYABLE`** (or **`FAILED`** permanently if retries are exhausted).
+
+The `RecoveryScheduler` picks up `FAILED_RETRYABLE` steps on its next cycle, but only those whose `next_retry_at` timestamp is in the past. This means the **effective retry delay is the longer of the two**: the configured `RetryPolicy` delay and the time until the next scheduler tick (`recoveryIntervalSeconds`, default 30 s).
+
+The default `RetryPolicy` is 3 attempts with a 1-second fixed delay. Because the scheduler runs every 30 s by default, in practice each retry fires roughly 30 s after the previous failure (the 1 s floor is invisible at that interval).
+
+You can tune this per step when building the workflow:
+
+```java
+// Fixed delay – retry at most 5 times, waiting 10 seconds between attempts
+WorkflowDefinition wf = WorkflowDefinition.builder("my-workflow")
+    .step("step-a", ctx -> { /* … */ },
+          RetryPolicy.fixedDelay(5, Duration.ofSeconds(10)))
+    .build();
+
+// Exponential back-off – doubles the delay each attempt up to 5 minutes, with jitter
+WorkflowDefinition wf = WorkflowDefinition.builder("my-workflow")
+    .step("step-b", ctx -> { /* … */ },
+          RetryPolicy.exponentialBackoff(6, Duration.ofSeconds(5), 2.0, Duration.ofMinutes(5), true))
+    .build();
+```
+
+To lower the time between retry attempts also reduce `recoveryIntervalSeconds`:
+
+```java
+DurableFlowConfig config = DurableFlowConfig.builder()
+    .recoveryIntervalSeconds(5)   // check for retryable steps every 5 seconds
+    .build();
+```
+
+See [Configuration Reference](configuration.md) for all available options.
