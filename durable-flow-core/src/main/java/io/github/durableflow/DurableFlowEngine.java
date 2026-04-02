@@ -115,7 +115,10 @@ public class DurableFlowEngine implements Closeable {
      *   <li>In {@link ExecutionMode#SYNCHRONOUS} mode this method blocks on the calling
      *       thread until all currently-executable steps have run, and returns the actual
      *       final {@link MessageState} ({@code PROCESSED}, {@code PARKED}, {@code ERROR},
-     *       or {@code IN_PROGRESS} if some steps are still waiting for a retry window).</li>
+     *       or {@code IN_PROGRESS} if some steps are still waiting for a retry window).
+     *       Within each wave of eligible steps (those whose dependencies are already
+     *       satisfied) the steps are executed concurrently on virtual threads; the calling
+     *       thread joins them all before advancing to the next wave.</li>
      * </ul>
      *
      * <p><strong>Using an external JDBC connection ({@link ReceiveOptions#connection()}):</strong>
@@ -150,8 +153,8 @@ public class DurableFlowEngine implements Closeable {
      *
      * <p>Example — SYNCHRONOUS mode:
      * <pre>{@code
-     * // The message is written to the DB and then steps execute on this thread.
-     * // receive() blocks until all currently-executable steps have finished.
+     * // The message is written to the DB, then eligible steps execute concurrently on
+     * // virtual threads. receive() blocks until every wave of parallel steps has finished.
      * ReceiveResult result = engine.receive(message, ReceiveOptions.withDeferredExecution(workflow));
      * // result.messageState() == PROCESSED | PARKED | IN_PROGRESS | ERROR
      * }</pre>
@@ -238,11 +241,12 @@ public class DurableFlowEngine implements Closeable {
                 throw new RuntimeException("Database connection error", e);
             }
 
-            // Execute eligible steps: on the calling thread (SYNCHRONOUS) or dispatched to the
-            // background executor (ASYNCHRONOUS). The persistence connection has already been
-            // closed, so it does not compete with execution-time connections.
+            // Execute eligible steps: concurrently on virtual threads, joined by the calling
+            // thread (SYNCHRONOUS) or dispatched to the background executor (ASYNCHRONOUS).
+            // The persistence connection has already been closed, so it does not compete with
+            // execution-time connections.
             if (config.getExecutionMode() == ExecutionMode.SYNCHRONOUS) {
-                // Execute steps on the calling thread and return the actual final state
+                // Dispatch eligible steps to virtual threads and block until all waves complete.
                 MessageState finalState = orchestrator.executeEligibleSteps(messageId, workflow);
                 return new ReceiveResult(messageId, false, finalState);
             } else {

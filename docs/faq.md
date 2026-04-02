@@ -131,16 +131,19 @@ WorkflowDefinition wf = WorkflowDefinition.builder("order-workflow")
     .build();
 ```
 
-**`SYNCHRONOUS` vs `ASYNCHRONOUS` controls whether steps of a single message run concurrently:**
+**`SYNCHRONOUS` vs `ASYNCHRONOUS` controls when `engine.receive()` returns relative to step execution — not whether steps run in parallel:**
 
 | Mode | Parallel steps within one message? | What `engine.receive()` returns |
 |------|------------------------------------|---------------------------------|
 | `ASYNCHRONOUS` (default) | **Yes** — all currently eligible steps are submitted to a virtual-thread pool at the same time and execute concurrently | `MessageState.RECEIVED` immediately (before steps finish) |
-| `SYNCHRONOUS` | **No** — steps of a single message execute one at a time on the calling thread | Final `MessageState` (e.g. `PROCESSED`) only after all steps finish |
+| `SYNCHRONOUS` | **Yes** — all currently eligible steps are dispatched to virtual threads and execute concurrently; the calling thread joins them all before advancing to the next wave | Final `MessageState` (e.g. `PROCESSED`) only after all steps finish |
 
-In **`ASYNCHRONOUS` mode** the engine submits every currently eligible step for a message to a `Thread.ofVirtual()` per-task executor. If `reserve-stock` and `send-confirmation` are both eligible (because `ingest-order` just succeeded), they are dispatched to two different virtual threads and genuinely overlap.
+In **both modes** the engine dispatches every currently eligible step for a message to a `Thread.ofVirtual()` per-task executor. "Currently eligible" means the step's `dependsOn` list is empty *or* every named dependency has already succeeded — the engine never dispatches a step that still has an unmet dependency. If `reserve-stock` and `send-confirmation` are both eligible (because `ingest-order` just succeeded), they are dispatched to two different virtual threads and genuinely overlap regardless of mode.
 
-In **`SYNCHRONOUS` mode** there is **no parallel execution for the steps of that message**. The engine runs one eligible step, waits for it to finish, then re-queries for the next newly-unblocked step, and repeats until the workflow is complete. The fan-out shown above would therefore run `reserve-stock` first, then `send-confirmation` sequentially — both on the calling thread. Use `ASYNCHRONOUS` (the default) if parallel step throughput matters.
+The key difference is **when `receive()` returns**:
+
+- In **`ASYNCHRONOUS` mode** `receive()` returns immediately with `MessageState.RECEIVED` and the steps continue in the background.
+- In **`SYNCHRONOUS` mode** `receive()` blocks, joining each wave of concurrent virtual threads, and only returns once all currently-executable steps have finished. Use this mode when you need the final `MessageState` before proceeding.
 
 Configure the mode via `DurableFlowConfig`:
 

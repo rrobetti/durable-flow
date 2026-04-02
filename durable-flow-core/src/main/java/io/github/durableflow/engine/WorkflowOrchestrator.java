@@ -13,6 +13,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -53,6 +54,13 @@ public class WorkflowOrchestrator {
      * Find and execute all eligible steps for the given message, invoking lifecycle hooks
      * before and after the execution loop.
      *
+     * <p>Only steps whose {@code dependsOn} list is empty or whose every named dependency
+     * has already succeeded are considered eligible; this invariant is enforced by
+     * {@code findEligibleSteps()}. All eligible steps for the current message are dispatched
+     * concurrently to the virtual-thread executor in each loop iteration, and the caller
+     * blocks until every dispatched step has completed before re-querying for the next wave
+     * of newly-unblocked steps.
+     *
      * <p>This method is safe to call concurrently; step claiming is atomic.
      *
      * @return the {@link MessageState} of the message after execution completes
@@ -66,7 +74,12 @@ public class WorkflowOrchestrator {
         boolean anyExecuted = true;
         while (anyExecuted) {
             anyExecuted = false;
+            // findEligibleSteps() returns only steps whose every dependsOn entry is SUCCEEDED,
+            // so every step in this list is safe to run right now.
             List<StepRecord> eligible = stepRepository.findEligibleSteps(ELIGIBLE_STEP_BATCH_SIZE);
+
+            // Dispatch all eligible steps for this message concurrently on virtual threads.
+            List<CompletableFuture<Boolean>> futures = new ArrayList<>();
             for (StepRecord step : eligible) {
                 if (!step.getMessageId().equals(messageId)) continue;
                 StepDefinition def = stepsByName.get(step.getStepName());
@@ -74,8 +87,13 @@ public class WorkflowOrchestrator {
                     log.warn("No StepDefinition found for step: {}", step.getStepName());
                     continue;
                 }
-                boolean executed = executeStep(step, def, workflow);
-                if (executed) anyExecuted = true;
+                futures.add(CompletableFuture.supplyAsync(
+                        () -> executeStep(step, def, workflow), executorService));
+            }
+
+            // Wait for all dispatched steps to finish before checking for the next wave.
+            for (CompletableFuture<Boolean> future : futures) {
+                if (future.join()) anyExecuted = true;
             }
         }
 
