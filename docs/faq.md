@@ -131,14 +131,16 @@ WorkflowDefinition wf = WorkflowDefinition.builder("order-workflow")
     .build();
 ```
 
-**`SYNCHRONOUS` vs `ASYNCHRONOUS` controls _when_ steps are dispatched, not _whether_ eligible steps can overlap:**
+**`SYNCHRONOUS` vs `ASYNCHRONOUS` controls whether steps of a single message run concurrently:**
 
-| Mode | What `engine.receive()` returns | Where steps execute |
-|------|--------------------------------|---------------------|
-| `ASYNCHRONOUS` (default) | `MessageState.RECEIVED` immediately | Background virtual-thread pool — multiple eligible steps dispatched concurrently |
-| `SYNCHRONOUS` | Final `MessageState` (e.g. `PROCESSED`) after all steps finish | Calling thread — the engine loops over eligible steps until none remain |
+| Mode | Parallel steps within one message? | What `engine.receive()` returns |
+|------|------------------------------------|---------------------------------|
+| `ASYNCHRONOUS` (default) | **Yes** — all currently eligible steps are submitted to a virtual-thread pool at the same time and execute concurrently | `MessageState.RECEIVED` immediately (before steps finish) |
+| `SYNCHRONOUS` | **No** — steps of a single message execute one at a time on the calling thread | Final `MessageState` (e.g. `PROCESSED`) only after all steps finish |
 
-In `ASYNCHRONOUS` mode the engine submits all currently eligible steps to a `Thread.ofVirtual()` per-task executor, so they truly overlap in different virtual threads. In `SYNCHRONOUS` mode the engine iterates in a tight loop on the calling thread: after each step completes, it re-queries eligible steps (newly unblocked by the step that just finished) and executes them before returning. Concurrency within a single `receive()` call is not possible in `SYNCHRONOUS` mode, but independent workflow messages on different threads can still run fully in parallel.
+In **`ASYNCHRONOUS` mode** the engine submits every currently eligible step for a message to a `Thread.ofVirtual()` per-task executor. If `reserve-stock` and `send-confirmation` are both eligible (because `ingest-order` just succeeded), they are dispatched to two different virtual threads and genuinely overlap.
+
+In **`SYNCHRONOUS` mode** there is **no parallel execution for the steps of that message**. The engine runs one eligible step, waits for it to finish, then re-queries for the next newly-unblocked step, and repeats until the workflow is complete. The fan-out shown above would therefore run `reserve-stock` first, then `send-confirmation` sequentially — both on the calling thread. Use `ASYNCHRONOUS` (the default) if parallel step throughput matters.
 
 Configure the mode via `DurableFlowConfig`:
 
