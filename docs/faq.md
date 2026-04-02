@@ -15,6 +15,17 @@ The `RecoveryScheduler` handles this automatically through **lease-based recover
 
 In the worst case the step is retried after at most `leaseTimeoutSeconds + recoveryIntervalSeconds` (≈ 90 s with defaults). No manual intervention is needed.
 
+### Context is always reconstructed from the database
+
+No in-memory state is involved in recovery. Before executing any step — including a step being retried after a crash — the engine calls `WorkflowOrchestrator.buildContext()`, which re-loads everything it needs directly from the database:
+
+| Data | Source |
+|------|--------|
+| Original message payload | `messages.payload_data` (BYTEA) |
+| Output of each upstream step | `message_steps.result_data` (BYTEA) |
+
+The crashed step itself had not yet written its own result (it never completed), so only the outputs of its dependencies matter — and those were already persisted when those upstream steps succeeded. The reconstructed `StepContext` therefore contains the same `payload` and `previousStepOutputs` map that the original execution would have seen.
+
 To tune the recovery window adjust these two settings:
 
 ```java
