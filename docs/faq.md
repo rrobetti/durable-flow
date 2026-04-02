@@ -15,6 +15,24 @@ The `RecoveryScheduler` handles this automatically through **lease-based recover
 
 In the worst case the step is retried after at most `leaseTimeoutSeconds + recoveryIntervalSeconds` (≈ 90 s with defaults). No manual intervention is needed.
 
+### The lease is fresh for every attempt
+
+Each attempt — including the first execution and every subsequent retry — acquires a **brand-new lease**. When the engine claims a step it atomically executes:
+
+```sql
+UPDATE message_steps
+SET step_state    = 'RUNNING',
+    owner         = ?,              -- current node ID
+    locked_until  = ?,              -- NOW() + leaseTimeoutSeconds
+    attempt_count = attempt_count + 1,
+    ...
+WHERE id = ?
+  AND step_state IN ('PENDING', 'FAILED_RETRYABLE')
+  AND (locked_until IS NULL OR locked_until < CURRENT_TIMESTAMP)
+```
+
+When the step fails (or crashes and its lease expires), `locked_until` and `owner` are both reset to `NULL` before the step is transitioned to `FAILED_RETRYABLE`. The next attempt therefore starts clean with a fresh `locked_until = NOW() + leaseTimeoutSeconds`, giving it the full configured lease window regardless of what happened in previous attempts.
+
 ### Context is always reconstructed from the database
 
 No in-memory state is involved in recovery. Before executing any step — including a step being retried after a crash — the engine calls `WorkflowOrchestrator.buildContext()`, which re-loads everything it needs directly from the database:
