@@ -106,3 +106,84 @@ DurableFlowConfig config = DurableFlowConfig.builder()
 See [Configuration Reference](configuration.md) for all available options.
 
 📊 See the [Step Retry flow diagram](retry-flow.md) for a visual of the full retry lifecycle.
+
+---
+
+## When do steps run in parallel, and does SYNCHRONOUS vs ASYNCHRONOUS mode affect that?
+
+**Steps run in parallel whenever they have no unfulfilled dependencies.** The engine queries the database for all steps whose `dependsOn` list is satisfied (all upstream steps are `SUCCEEDED`) and dispatches them together. Two steps that each declare no `dependsOn`, or two steps that each declare the same completed step as their only dependency, will be picked up and executed at the same time.
+
+```java
+WorkflowDefinition wf = WorkflowDefinition.builder("order-workflow")
+    // ingest-order has no dependencies — eligible immediately
+    .step("ingest-order",   ctx -> { /* … */ })
+
+    // reserve-stock and send-confirmation both depend only on ingest-order
+    // → they become eligible together and run in parallel
+    .step("reserve-stock",  ctx -> { /* … */ })
+        .dependsOn("ingest-order")
+    .step("send-confirmation", ctx -> { /* … */ })
+        .dependsOn("ingest-order")
+
+    // finalise depends on BOTH parallel steps → waits for both to complete
+    .step("finalise", ctx -> { /* … */ })
+        .dependsOn("reserve-stock", "send-confirmation")
+    .build();
+```
+
+**`SYNCHRONOUS` vs `ASYNCHRONOUS` controls _when_ steps are dispatched, not _whether_ eligible steps can overlap:**
+
+| Mode | What `engine.receive()` returns | Where steps execute |
+|------|--------------------------------|---------------------|
+| `ASYNCHRONOUS` (default) | `MessageState.RECEIVED` immediately | Background virtual-thread pool — multiple eligible steps dispatched concurrently |
+| `SYNCHRONOUS` | Final `MessageState` (e.g. `PROCESSED`) after all steps finish | Calling thread — the engine loops over eligible steps until none remain |
+
+In `ASYNCHRONOUS` mode the engine submits all currently eligible steps to a `Thread.ofVirtual()` per-task executor, so they truly overlap in different virtual threads. In `SYNCHRONOUS` mode the engine iterates in a tight loop on the calling thread: after each step completes, it re-queries eligible steps (newly unblocked by the step that just finished) and executes them before returning. Concurrency within a single `receive()` call is not possible in `SYNCHRONOUS` mode, but independent workflow messages on different threads can still run fully in parallel.
+
+Configure the mode via `DurableFlowConfig`:
+
+```java
+DurableFlowConfig config = DurableFlowConfig.builder()
+    .executionMode(ExecutionMode.SYNCHRONOUS)   // or ExecutionMode.ASYNCHRONOUS (default)
+    .build();
+```
+
+---
+
+## Can a step return any Java object? How is step output stored and passed to downstream steps?
+
+A step must return a **`StepResult`** value. The output inside `StepResult` is always a **`byte[]`** — the engine stores and retrieves raw bytes with no automatic serialization. You are responsible for serializing your business object to bytes before creating the `StepResult`, and for deserializing it in any downstream step that reads the output.
+
+```java
+// Step A: serialize output to bytes
+.step("step-a", ctx -> {
+    MyResult result = /* … */;
+    byte[] bytes = objectMapper.writeValueAsBytes(result);   // JSON, Protobuf, etc.
+    return StepResult.of(bytes);
+})
+
+// Step B: deserialize bytes from upstream step
+.step("step-b", ctx -> {
+    byte[] bytes = ctx.getPreviousStepOutputs().get("step-a");
+    MyResult upstream = objectMapper.readValue(bytes, MyResult.class);
+    // … use upstream result
+    return StepResult.empty();
+})
+.dependsOn("step-a")
+```
+
+**How output travels through the database:**
+
+| Stage | What happens |
+|-------|-------------|
+| Step completes | `result_data = ?` (JDBC `setBytes`) written to `message_steps` |
+| Dependent step starts | `buildContext()` calls `getStepOutputs()` — JDBC `getBytes` reads `result_data` for every dependency |
+| Context exposed | `StepContext.getPreviousStepOutputs()` returns `Map<String, byte[]>` keyed by step name |
+
+The engine never inspects or transforms the bytes. You can use any serialization format — Jackson JSON, Protobuf, Java's built-in serialization, or plain UTF-8 strings — as long as the producing and consuming steps agree on the format.
+
+Step metadata (the `Map<String, String>` side-channel in `StepResult`) is stored separately as JSON and is also available via `StepContext.getMetadata()`, but it is limited to string key-value pairs.
+
+If a step has no output to pass downstream, use `StepResult.empty()`.
+
+See [Core Concepts](core-concepts.md) for a full description of `StepContext` and `StepResult`.
