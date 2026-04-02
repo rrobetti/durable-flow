@@ -15,9 +15,35 @@ The `RecoveryScheduler` handles this automatically through **lease-based recover
 
 In the worst case the step is retried after at most `leaseTimeoutSeconds + recoveryIntervalSeconds` (≈ 90 s with defaults). No manual intervention is needed.
 
-### The lease is fresh for every attempt
+To tune the recovery window adjust these two settings:
 
-Each attempt — including the first execution and every subsequent retry — acquires a **brand-new lease**. When the engine claims a step it atomically executes:
+```java
+DurableFlowConfig config = DurableFlowConfig.builder()
+    .leaseTimeoutSeconds(60)       // how long before a RUNNING step is considered stuck
+    .recoveryIntervalSeconds(30)   // how often the recovery scheduler runs
+    .build();
+```
+
+See [Configuration Reference](configuration.md) for all available options.
+
+---
+
+## How does a retried step reconstruct the context passed between steps?
+
+No in-memory state is involved in recovery. Before executing any step — including a step being retried after a crash or a normal failure — the engine calls `WorkflowOrchestrator.buildContext()`, which re-loads everything it needs directly from the database:
+
+| Data | Source |
+|------|--------|
+| Original message payload | `messages.payload_data` (BYTEA) |
+| Output of each upstream step | `message_steps.result_data` (BYTEA) |
+
+The retried step itself had not yet written its own result (it never completed successfully), so only the outputs of its upstream dependencies matter — and those were already persisted when those steps succeeded. The reconstructed `StepContext` therefore contains the same `payload` and `previousStepOutputs` map that the original execution would have seen.
+
+---
+
+## Is the step lease renewed on each retry, or does a single lease span all attempts?
+
+The lease is **renewed fresh for every attempt**. When the engine claims a step — whether for the first execution or any subsequent retry — it atomically sets a new `locked_until = NOW() + leaseTimeoutSeconds` and `owner = nodeId` alongside transitioning to `RUNNING`:
 
 ```sql
 UPDATE message_steps
@@ -31,29 +57,7 @@ WHERE id = ?
   AND (locked_until IS NULL OR locked_until < CURRENT_TIMESTAMP)
 ```
 
-When the step fails (or crashes and its lease expires), `locked_until` and `owner` are both reset to `NULL` before the step is transitioned to `FAILED_RETRYABLE`. The next attempt therefore starts clean with a fresh `locked_until = NOW() + leaseTimeoutSeconds`, giving it the full configured lease window regardless of what happened in previous attempts.
-
-### Context is always reconstructed from the database
-
-No in-memory state is involved in recovery. Before executing any step — including a step being retried after a crash — the engine calls `WorkflowOrchestrator.buildContext()`, which re-loads everything it needs directly from the database:
-
-| Data | Source |
-|------|--------|
-| Original message payload | `messages.payload_data` (BYTEA) |
-| Output of each upstream step | `message_steps.result_data` (BYTEA) |
-
-The crashed step itself had not yet written its own result (it never completed), so only the outputs of its dependencies matter — and those were already persisted when those upstream steps succeeded. The reconstructed `StepContext` therefore contains the same `payload` and `previousStepOutputs` map that the original execution would have seen.
-
-To tune the recovery window adjust these two settings:
-
-```java
-DurableFlowConfig config = DurableFlowConfig.builder()
-    .leaseTimeoutSeconds(60)       // how long before a RUNNING step is considered stuck
-    .recoveryIntervalSeconds(30)   // how often the recovery scheduler runs
-    .build();
-```
-
-See [Configuration Reference](configuration.md) for all available options.
+When a step fails (or crashes and its lease expires), `locked_until` and `owner` are both reset to `NULL` as part of the `FAILED_RETRYABLE` transition. The next attempt therefore starts clean with a full, fresh lease window — there is no shared or cumulative lease across attempts.
 
 ---
 
