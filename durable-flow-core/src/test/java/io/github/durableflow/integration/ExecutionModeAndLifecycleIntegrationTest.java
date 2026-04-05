@@ -24,6 +24,48 @@ class ExecutionModeAndLifecycleIntegrationTest extends BaseIntegrationTest {
     // -------------------------------------------------------------------------
 
     @Test
+    void synchronousMode_parallelSteps_runConcurrently() throws Exception {
+        // Both steps count down the latch and then await it.
+        // If steps were sequential, the first step would block forever waiting for the
+        // second step to count down — proving that only concurrent execution can pass.
+        CountDownLatch bothStarted = new CountDownLatch(2);
+
+        DurableFlowEngine syncEngine = new DurableFlowEngine(dataSource, DurableFlowConfig.builder()
+                .leaseTimeoutSeconds(30)
+                .recoveryIntervalSeconds(30)
+                .schemaAutoMigrate(false)
+                .executionMode(ExecutionMode.SYNCHRONOUS)
+                .build());
+
+        try {
+            syncEngine.start();
+            WorkflowDefinition wf = WorkflowDefinition.builder("sync-parallel-wf")
+                    // Both steps have no dependencies → eligible together in the first wave
+                    .step("parallel-a", ctx -> {
+                        bothStarted.countDown();
+                        assertTrue(bothStarted.await(10, TimeUnit.SECONDS),
+                                "parallel-a timed out waiting for parallel-b to start");
+                        return StepResult.empty();
+                    })
+                    .step("parallel-b", ctx -> {
+                        bothStarted.countDown();
+                        assertTrue(bothStarted.await(10, TimeUnit.SECONDS),
+                                "parallel-b timed out waiting for parallel-a to start");
+                        return StepResult.empty();
+                    })
+                    .build();
+
+            ReceiveResult result = syncEngine.receive(
+                    message("sync-parallel-src", "data"), ReceiveOptions.withDeferredExecution(wf));
+
+            assertEquals(MessageState.PROCESSED, result.messageState(),
+                    "SYNCHRONOUS receive must return PROCESSED after all parallel steps complete");
+        } finally {
+            syncEngine.close();
+        }
+    }
+
+    @Test
     void synchronousMode_receiveBlocksUntilCompletion() throws Exception {
         DurableFlowEngine syncEngine = new DurableFlowEngine(dataSource, DurableFlowConfig.builder()
                 .leaseTimeoutSeconds(30)
